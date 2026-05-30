@@ -2,6 +2,7 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: 16px;
   padding: 16px 24px;
   padding-right: 160px; /* Leave space for Windows caption buttons */
   background: var(--bg-card);
@@ -11,12 +12,13 @@
   -webkit-app-region: drag; /* Allow dragging the window */
 }
 
-.left { display: flex; align-items: center; gap: 16px; min-width: 200px; }
+.left { display: flex; align-items: center; gap: 16px; min-width: 200px; flex-shrink: 0; }
 .center { 
   flex: 1; 
   display: flex; 
   justify-content: center; 
   padding: 0 24px;
+  min-width: 240px;
   -webkit-app-region: no-drag; 
 }
 .right { display: flex; align-items: center; gap: 24px; min-width: 200px; justify-content: flex-end; }
@@ -252,7 +254,13 @@
 }
 .iconBtn:disabled { opacity: 0.5; cursor: not-allowed; }
 
-.icon { font-size: 18px; }
+.icon {
+  width: 18px;
+  height: 18px;
+  display: block;
+  flex-shrink: 0;
+  transform-origin: center;
+}
 .spin { animation: spin 1s linear infinite; }
 @keyframes spin { 100% { transform: rotate(360deg); } }
 
@@ -301,6 +309,57 @@
 .lastUpdated {
   font-size: 11px;
   color: var(--text-dim);
+}
+
+@media (max-width: 1500px) {
+  .header {
+    flex-wrap: wrap;
+    row-gap: 10px;
+    padding-top: 14px;
+    padding-bottom: 12px;
+  }
+
+  .left {
+    flex: 1 1 auto;
+    min-width: 420px;
+  }
+
+  .right {
+    flex: 0 1 auto;
+    gap: 12px;
+    min-width: 0;
+  }
+
+  .center {
+    order: 3;
+    flex: 0 0 100%;
+    justify-content: center;
+    padding: 0 160px 0 200px;
+  }
+
+  .searchInput {
+    max-width: 360px;
+  }
+
+  .headerActions {
+    gap: 6px;
+  }
+
+  .deepScanBtn,
+  .rulesToggleBtn,
+  .gameModeBtn,
+  .profileSelect {
+    white-space: nowrap;
+  }
+
+  .stats {
+    gap: 12px;
+  }
+
+  .stats > :nth-child(2),
+  .stats > :nth-child(3) {
+    display: none;
+  }
 }
 
 .navTabs {
