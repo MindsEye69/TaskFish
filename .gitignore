@@ -46,6 +46,7 @@ yarn-error.log*
 /.codegraph/
 /.chatboks/
 /.cursor/
+/chatboks.md
 
 # bundled/local binaries
 /ollama.exe
