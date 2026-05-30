@@ -14,6 +14,19 @@ pnpm dev
 bun dev
 ```
 
+## 🚀 Building for Windows (.exe)
+
+1. **Pre-requisites**: Ensure you have [Ollama](https://ollama.com/) installed or have the `ollama.exe` binary.
+2. **Setup Sidecar**: Copy your `ollama.exe` into the `resources/bin/` directory.
+3. **Build**:
+   ```bash
+   npm run electron-build
+   ```
+4. **Output**: Your installer will be generated in the `dist_electron/` folder.
+
+## 🧠 AI Deep Scan
+TaskFish uses an ephemeral AI architecture. It stores all analysis in a local cache to ensure zero RAM impact during normal operation. Click **Deep Scan** to analyze all unknown processes at once.
+
 Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
 
 You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.

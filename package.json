@@ -1,12 +1,33 @@
 {
-  "name": "tasker-poc",
+  "name": "taskfish",
   "version": "0.1.0",
+  "description": "TaskFish: Intelligent Process Manager and Game Mode Optimizer",
+  "author": "MindsEye",
   "private": true,
+  "main": "dist/electron-main/main.js",
+  "build": {
+    "appId": "com.mindseye.taskfish",
+    "productName": "TaskFish",
+    "directories": { "output": "dist_electron" },
+    "files": [
+      "build/icon.ico",
+      "dist/**/*",
+      "out/**/*",
+      "package.json"
+    ],
+    "win": {
+      "executableName": "TaskFish",
+      "icon": "build/icon.ico",
+      "signAndEditExecutable": false
+    }
+  },
   "scripts": {
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "electron-dev": "concurrently \"next dev\" \"tsc -p tsconfig.electron.json -w\" \"wait-on http://localhost:3000 && electron .\"",
+    "electron-build": "node scripts/build.js"
   },
   "dependencies": {
     "next": "16.2.4",
@@ -17,8 +38,13 @@
     "@types/node": "^20",
     "@types/react": "^19",
     "@types/react-dom": "^19",
+    "concurrently": "^9.2.1",
+    "cross-env": "^10.1.0",
+    "electron": "^41.5.0",
+    "electron-builder": "^26.8.1",
     "eslint": "^9",
     "eslint-config-next": "16.2.4",
-    "typescript": "^5"
+    "typescript": "^5",
+    "wait-on": "^9.0.5"
   }
 }

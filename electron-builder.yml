@@ -1,0 +1,25 @@
+appId: com.taskfish.app
+productName: TaskFish
+directories:
+  output: dist_electron
+  buildResources: build
+files:
+  - dist/**/*
+  - out/**/*
+  - package.json
+extraResources:
+  - from: resources/bin
+    to: bin
+electronFuses:
+  enableEmbeddedAsarIntegrityValidation: false
+  onlyLoadAppFromAsar: false
+
+win:
+  target: dir
+  icon: build/icon.ico
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+  shortcutName: TaskFish
+  createDesktopShortcut: true
+  runAfterFinish: true

@@ -15,20 +15,49 @@
 
 # next.js
 /.next/
+/.next-dev/
 /out/
 
-# production
+# production/build outputs
 /build
+/dist/
+/dist_electron/
+/release/
+/releases/
+/app/
 
 # misc
 .DS_Store
 *.pem
+*.log
+*.local
 
 # debug
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 .pnpm-debug.log*
+
+# local runtime data
+/data/rules.json
+/logs/
+
+# local agent/tool state
+/.codegraph/
+/.chatboks/
+/.cursor/
+
+# bundled/local binaries
+/ollama.exe
+
+# electron-builder output
+*.blockmap
+*.dmg
+*.AppImage
+*.deb
+*.rpm
+*.msi
+*.nupkg
 
 # env files (can opt-in for committing if needed)
 .env*

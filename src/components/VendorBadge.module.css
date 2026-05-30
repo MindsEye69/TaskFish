@@ -1,0 +1,242 @@
+.wrap {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  width: 100px;
+}
+
+/* ── Circular badge button ──────────────────────────────────────────────── */
+.badge {
+  position: relative;
+  width: 88px;
+  height: 88px;
+  border-radius: 50%;
+  background: rgba(255,255,255,0.03);
+  border: none;
+  cursor: pointer;
+  padding: 0;
+  transition: transform 0.18s cubic-bezier(.34,1.56,.64,1),
+              background 0.18s ease;
+  outline: none;
+}
+
+.badge:hover {
+  transform: scale(1.08);
+  background: rgba(255,255,255,0.06);
+}
+
+.badge:hover .glowRing {
+  opacity: 0.35 !important;
+}
+
+.badge.active {
+  transform: scale(1.05);
+  background: rgba(255,255,255,0.07);
+}
+
+.alertBadge {
+  animation: alertPulse 2.5s ease-in-out infinite;
+}
+
+@keyframes alertPulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(248,113,113,0); }
+  50%       { box-shadow: 0 0 0 6px rgba(248,113,113,0.18); }
+}
+
+/* SVG arc animation */
+.arc {
+  transition: stroke-dashoffset 0.6s ease;
+}
+
+.iconText {
+  transition: fill 0.18s ease;
+  user-select: none;
+}
+
+.glowRing {
+  transition: opacity 0.18s ease;
+}
+
+.centerIcon {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: 34px;
+  height: 34px;
+  pointer-events: none;
+  object-fit: contain;
+  filter: drop-shadow(0 2px 8px rgba(0,0,0,0.35));
+}
+
+/* ── Trust dot ─────────────────────────────────────────────────────────── */
+.trustDot {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  border: 1.5px solid var(--bg-card, #22223a);
+}
+
+/* ── Process count bubble ──────────────────────────────────────────────── */
+.procCount {
+  position: absolute;
+  bottom: 5px;
+  right: 5px;
+  min-width: 18px;
+  height: 18px;
+  border-radius: 9px;
+  background: rgba(0,0,0,0.55);
+  border: 1px solid rgba(255,255,255,0.12);
+  color: rgba(255,255,255,0.75);
+  font-size: 10px;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 4px;
+  letter-spacing: -0.02em;
+}
+
+/* ── Label below badge ─────────────────────────────────────────────────── */
+.label {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1px;
+  width: 100%;
+}
+
+.vendorName {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text, #f0f0f8);
+  text-align: center;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 98px;
+}
+
+.vendorRam {
+  font-size: 10px;
+  color: var(--text-muted, #8888aa);
+  text-align: center;
+}
+
+/* ── Expanded dropdown ─────────────────────────────────────────────────── */
+.dropdown {
+  position: absolute;
+  top: calc(100% + 8px);
+  left: 50%;
+  transform: translateX(-50%);
+  width: 280px;
+  background: var(--bg-card, #22223a);
+  border: 1px solid rgba(255,255,255,0.1);
+  border-radius: 12px;
+  box-shadow: 0 16px 48px rgba(0,0,0,0.6);
+  z-index: 100;
+  overflow: hidden;
+  animation: dropIn 0.16s cubic-bezier(.34,1.56,.64,1);
+}
+
+@keyframes dropIn {
+  from { opacity: 0; transform: translateX(-50%) translateY(-8px) scale(0.96); }
+  to   { opacity: 1; transform: translateX(-50%) translateY(0)   scale(1);    }
+}
+
+.dropdownHeader {
+  padding: 12px 14px 8px;
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  border-bottom: 1px solid rgba(255,255,255,0.06);
+  font-size: 13px;
+}
+
+.dropCount {
+  font-size: 11px;
+  color: var(--text-muted, #8888aa);
+  margin-left: auto;
+}
+
+/* ── Process rows ──────────────────────────────────────────────────────── */
+.procList {
+  max-height: 260px;
+  overflow-y: auto;
+  padding: 4px 0;
+}
+
+.procList::-webkit-scrollbar { width: 4px; }
+.procList::-webkit-scrollbar-track { background: transparent; }
+.procList::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.1); border-radius: 2px; }
+
+.procRow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 14px;
+  cursor: pointer;
+  transition: background 0.1s ease;
+  border-radius: 0;
+}
+
+.procRow:hover {
+  background: rgba(255,255,255,0.05);
+}
+
+.procDot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.procName {
+  flex: 1;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text, #f0f0f8);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.procRam {
+  font-size: 11px;
+  color: var(--text-muted, #8888aa);
+  flex-shrink: 0;
+}
+
+.rulePill {
+  font-size: 9px;
+  font-weight: 700;
+  padding: 2px 6px;
+  border-radius: 4px;
+  letter-spacing: 0.05em;
+  flex-shrink: 0;
+}
+
+.rulePill.allow   { background: rgba(34,197,94,0.15);  color: #22c55e; }
+.rulePill.limited { background: rgba(245,158,11,0.15); color: #f59e0b; }
+.rulePill.ban     { background: rgba(248,113,113,0.15);color: #f87171; }
+
+.analyzeBtn {
+  background: none;
+  border: none;
+  color: var(--text-muted, #8888aa);
+  cursor: pointer;
+  font-size: 18px;
+  line-height: 1;
+  padding: 0 2px;
+  flex-shrink: 0;
+  transition: color 0.1s ease;
+}
+
+.analyzeBtn:hover {
+  color: var(--text, #f0f0f8);
+}
