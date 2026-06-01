@@ -1,4 +1,4 @@
-import { app, BrowserWindow, Notification, ipcMain, Menu, Tray, nativeImage } from "electron";
+import { app, BrowserWindow, Notification, ipcMain, Menu, Tray, nativeImage, WebContents } from "electron";
 import path from "path";
 import fs from "fs";
 import { spawn, exec, ChildProcess } from "child_process";
@@ -450,7 +450,7 @@ function calcCpuPct(pid: number, kTime: number, uTime: number, ts100ns: number):
 // --- SIDECAR MANAGER ---
 let ollamaProcess: ChildProcess | null = null;
 
-async function startOllama() {
+async function startOllama(): Promise<boolean> {
   log("Starting Ollama...");
 
   try {
@@ -459,11 +459,11 @@ async function startOllama() {
     });
     if (probe.ok) {
       log("Ollama already running — skipping launch");
-      return;
+      return true;
     }
   } catch {}
 
-  if (ollamaProcess) return;
+  if (ollamaProcess) return true;
 
   const candidates: string[] = [];
   if (app.isPackaged) {
@@ -489,27 +489,37 @@ async function startOllama() {
 
   if (!binPath) {
     log("Ollama NOT FOUND — install from https://ollama.com");
-    return;
+    return false;
   }
 
   log("Starting Ollama at: " + binPath);
   ollamaProcess = exec(`"${binPath}" serve`, { windowsHide: true });
+  ollamaProcess.on("exit", () => {
+    ollamaProcess = null;
+    if (currentAiStatus.phase !== "pulling") {
+      broadcastAiStatus({ phase: "idle" });
+    }
+  });
 
   const deadline = Date.now() + 20000;
   while (Date.now() < deadline) {
     try {
       const r = await fetch("http://localhost:11434/api/version", { signal: AbortSignal.timeout(600) });
-      if (r.ok) { log("Ollama ready"); return; }
+      if (r.ok) { log("Ollama ready"); return true; }
     } catch {}
     await new Promise(r => setTimeout(r, 600));
   }
   log("Ollama did not become ready within 20s");
+  return false;
 }
 
 function stopOllama() {
   if (ollamaProcess) {
     ollamaProcess.kill();
     ollamaProcess = null;
+  }
+  if (currentAiStatus.phase !== "pulling") {
+    broadcastAiStatus({ phase: "idle" });
   }
 }
 
@@ -679,6 +689,7 @@ app.whenReady().then(() => {
   createTray();
   createWindow();
   startBackgroundEnforcement();
+  void ensureDefaultModel();
 });
 app.on("activate", showMainWindow);
 app.on("window-all-closed", () => {});
@@ -1011,7 +1022,7 @@ ipcMain.handle("set-background-enforcement", async (_event, active: boolean) => 
   return { rulesActive: setEnforcementActive(Boolean(active)) };
 });
 
-ipcMain.handle("start-ai-service", async () => startOllama());
+ipcMain.handle("start-ai-service", async (event) => ensureDefaultModel(event.sender));
 ipcMain.handle("stop-ai-service",  async () => stopOllama());
 
 ipcMain.handle("get-startup-info", async (_event, name: string) => {
@@ -1029,8 +1040,18 @@ ipcMain.handle("get-startup-info", async (_event, name: string) => {
   } catch { return { isStartupApp: false }; }
 });
 
-const MODEL_PREFERENCE  = ["gemma3:4b", "gemma2:2b", "llama3.2:3b", "llama3.2:1b", "mistral", "phi3:mini", "llama2"];
-const RECOMMENDED_MODEL = "gemma3:4b";
+const DEFAULT_MODEL = "llama3.2:1b";
+const MODEL_PREFERENCE  = [DEFAULT_MODEL, "llama3.2:3b", "gemma3:4b", "gemma2:2b", "mistral", "phi3:mini", "llama2"];
+const RECOMMENDED_MODEL = DEFAULT_MODEL;
+let modelSetupPromise: Promise<boolean> | null = null;
+
+type AiSetupPhase = "idle" | "starting" | "pulling" | "ready" | "error";
+let currentAiStatus: { phase: AiSetupPhase; model?: string; error?: string } = { phase: "idle" };
+
+function broadcastAiStatus(status: typeof currentAiStatus) {
+  currentAiStatus = status;
+  mainWindow?.webContents.send("ai-setup-status", status);
+}
 
 async function getInstalledModels(): Promise<string[]> {
   try {
@@ -1052,9 +1073,7 @@ async function getBestModel(): Promise<string | null> {
   return installed[0];
 }
 
-ipcMain.handle("list-models", async () => getInstalledModels());
-
-ipcMain.handle("pull-model", async (event, modelName: string) => {
+async function pullOllamaModel(modelName: string, sender?: WebContents): Promise<{ ok: boolean; error?: string }> {
   try {
     const response = await fetch("http://localhost:11434/api/pull", {
       method: "POST",
@@ -1066,6 +1085,7 @@ ipcMain.handle("pull-model", async (event, modelName: string) => {
     const reader  = (response.body as any).getReader();
     const decoder = new TextDecoder();
     let buf = "";
+    let pullError: string | null = null;
 
     while (true) {
       const { done, value } = await reader.read();
@@ -1077,16 +1097,93 @@ ipcMain.handle("pull-model", async (event, modelName: string) => {
         if (!line.trim()) continue;
         try {
           const progress = JSON.parse(line);
-          if (!event.sender.isDestroyed()) event.sender.send("pull-progress", progress);
+          if (progress.error) {
+            pullError = String(progress.error);
+          }
+          if (sender && !sender.isDestroyed()) sender.send("pull-progress", progress);
+          else mainWindow?.webContents.send("pull-progress", progress);
         } catch {}
       }
     }
 
-    if (!event.sender.isDestroyed()) event.sender.send("pull-progress", { status: "success" });
+    if (pullError) {
+      return { ok: false, error: pullError };
+    }
+
+    if (sender && !sender.isDestroyed()) sender.send("pull-progress", { status: "success" });
+    else mainWindow?.webContents.send("pull-progress", { status: "success" });
     return { ok: true };
   } catch (e) {
     return { ok: false, error: e instanceof Error ? e.message : String(e) };
   }
+}
+
+async function waitForOllama(timeoutMs: number): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      const r = await fetch("http://localhost:11434/api/version", { signal: AbortSignal.timeout(600) });
+      if (r.ok) return true;
+    } catch {}
+    await new Promise(r => setTimeout(r, 500));
+  }
+  return false;
+}
+
+async function ensureDefaultModel(sender?: WebContents): Promise<boolean> {
+  if (modelSetupPromise) return modelSetupPromise;
+  modelSetupPromise = (async () => {
+    broadcastAiStatus({ phase: "starting" });
+    const ready = await startOllama();
+    if (!ready) {
+      broadcastAiStatus({ phase: "error", error: "Ollama failed to start" });
+      return false;
+    }
+
+    const accepting = await waitForOllama(12000);
+    if (!accepting) {
+      broadcastAiStatus({ phase: "error", error: "Ollama started but did not accept requests within 12 s" });
+      return false;
+    }
+
+    const existing = await getBestModel();
+    if (existing) {
+      log(`AI model available: ${existing}`);
+      broadcastAiStatus({ phase: "ready", model: existing });
+      return true;
+    }
+
+    log(`No AI model found. Pulling ${DEFAULT_MODEL}...`);
+    notify("TaskFish AI setup", `Downloading ${DEFAULT_MODEL}. Analysis will be ready when this finishes.`);
+    broadcastAiStatus({ phase: "pulling" });
+    const result = await pullOllamaModel(DEFAULT_MODEL, sender);
+    if (!result.ok) {
+      log(`Model pull failed: ${result.error ?? "unknown error"}`);
+      broadcastAiStatus({ phase: "error", error: result.error ?? "Model download failed" });
+      return false;
+    }
+
+    const installed = await getBestModel();
+    if (installed) {
+      broadcastAiStatus({ phase: "ready", model: installed });
+    } else {
+      broadcastAiStatus({ phase: "error", error: "Model not found after pull" });
+    }
+    return Boolean(installed);
+  })().finally(() => {
+    modelSetupPromise = null;
+  });
+  return modelSetupPromise;
+}
+
+ipcMain.handle("list-models", async () => getInstalledModels());
+
+ipcMain.handle("get-ai-status", async () => currentAiStatus);
+
+ipcMain.handle("pull-model", async (event, modelName: string) => {
+  const ready = await startOllama();
+  if (!ready) return { ok: false, error: "Ollama is not available" };
+  return pullOllamaModel(modelName, event.sender);
 });
 
 async function collectProcessTelemetry(name: string): Promise<string> {
@@ -1171,7 +1268,7 @@ riskScore: 0 to 100 representing safety threat level (100 = extreme virus/malwar
 threatFlags: Array of strings representing behavior indicators (e.g. "suspicious_network", "unsigned_binary", "dll_injection", "cryptominer", "keylogger", "adware") if any, otherwise empty array []`;
 
 ipcMain.handle("analyze-process", async (_event, name: string) => {
-  await startOllama();
+  await ensureDefaultModel();
 
   const model = await getBestModel();
   if (!model) {
