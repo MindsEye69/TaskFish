@@ -16,16 +16,25 @@ bun dev
 
 ## 🚀 Building for Windows (.exe)
 
-1. **Pre-requisites**: Ensure you have [Ollama](https://ollama.com/) installed or have the `ollama.exe` binary.
-2. **Setup Sidecar**: Copy your `ollama.exe` into the `resources/bin/` directory.
-3. **Build**:
+1. **Pre-requisites**: Node.js 18+ and internet access (the build script auto-downloads the Ollama runtime).
+2. **Build**:
    ```bash
    npm run electron-build
    ```
-4. **Output**: Your installer will be generated in the `dist_electron/` folder.
+3. **Output**: Your installer will be generated in the `dist_electron/` folder.
+
+> **Offline / CI builds**: set `TASKFISH_SKIP_OLLAMA_DOWNLOAD=1` together with `TASKFISH_ALLOW_MISSING_OLLAMA=1` to skip the Ollama download (AI features will be unavailable in that build).
 
 ## 🧠 AI Deep Scan
 TaskFish uses an ephemeral AI architecture. It stores all analysis in a local cache to ensure zero RAM impact during normal operation. Click **Deep Scan** to analyze all unknown processes at once.
+
+## Third-party AI Runtime
+
+TaskFish bundles [Ollama](https://ollama.com) as a local AI runtime to power the **Analyze** and **Deep Scan** features. On first use, Ollama downloads a small open-weight model (e.g. `llama3.2:1b`, ~1 GB) to your machine.
+
+**TaskFish does not own or license Ollama or any AI model.** Ollama is a separate open-source project distributed under its own terms. The models Ollama downloads are subject to their own upstream licenses (e.g. Meta's Llama community license for Llama-family models). By enabling AI features you agree to those upstream terms.
+
+Core process management, enforcement rules, and the security center run fully without AI. Only the **Analyze** and **Deep Scan** actions require the local AI runtime.
 
 Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
 

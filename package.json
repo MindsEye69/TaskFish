@@ -15,10 +15,24 @@
       "out/**/*",
       "package.json"
     ],
+    "extraResources": [
+      {
+        "from": "resources/bin",
+        "to": "bin"
+      }
+    ],
     "win": {
+      "target": "nsis",
       "executableName": "TaskFish",
       "icon": "build/icon.ico",
       "signAndEditExecutable": false
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "shortcutName": "TaskFish",
+      "createDesktopShortcut": true,
+      "runAfterFinish": true
     }
   },
   "scripts": {

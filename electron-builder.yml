@@ -1,4 +1,4 @@
-appId: com.taskfish.app
+appId: com.mindseye.taskfish
 productName: TaskFish
 directories:
   output: dist_electron
@@ -15,7 +15,7 @@ electronFuses:
   onlyLoadAppFromAsar: false
 
 win:
-  target: dir
+  target: nsis
   icon: build/icon.ico
 nsis:
   oneClick: false

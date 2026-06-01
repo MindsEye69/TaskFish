@@ -50,6 +50,7 @@ yarn-error.log*
 
 # bundled/local binaries
 /ollama.exe
+/resources/bin/
 
 # electron-builder output
 *.blockmap
