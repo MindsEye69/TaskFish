@@ -1,6 +1,6 @@
 "use client";
 import { useMemo, useState } from "react";
-import type { TreeNode, RuleConfig } from "@/lib/types";
+import type { TreeNode, RuleConfig, AiSetupPhase } from "@/lib/types";
 import { buildVendorGroups } from "@/lib/vendors";
 import ProcessCard from "./ProcessCard";
 import VendorBadge from "./VendorBadge";
@@ -17,6 +17,8 @@ interface Props {
   onSelect: (node: TreeNode) => void;
   onAnalyze: (node: TreeNode) => void;
   onQuickVerify: (node: TreeNode) => void;
+  aiAvailable?: boolean;
+  aiSetupPhase?: AiSetupPhase;
 }
 
 function historyKey(name: string) {
@@ -83,7 +85,17 @@ function sortNodes(nodes: TreeNode[], sort: Sort): TreeNode[] {
   });
 }
 
-export default function ProcessGrid({ roots, rules, processHistory = {}, systemTotalRam = 20000, onSelect, onAnalyze, onQuickVerify }: Props) {
+export default function ProcessGrid({
+  roots,
+  rules,
+  processHistory = {},
+  systemTotalRam = 20000,
+  onSelect,
+  onAnalyze,
+  onQuickVerify,
+  aiAvailable = true,
+  aiSetupPhase = "idle",
+}: Props) {
   const [filter, setFilter]           = useState<Filter>("all");
   const [sort, setSort]               = useState<Sort>("ram");
   const [expandedIds, setExpandedIds] = useState<Set<number>>(new Set());
@@ -149,6 +161,8 @@ export default function ProcessGrid({ roots, rules, processHistory = {}, systemT
           onExpand={() => toggleExpand(node.id)}
           onClick={() => onSelect(node)}
           onAnalyze={() => onAnalyze(node)}
+          analyzeDisabled={!aiAvailable}
+          aiSetupPhase={aiSetupPhase}
           onQuickVerify={inUnknownTier ? () => onQuickVerify(node) : undefined}
           featured={featured}
         />
@@ -163,6 +177,8 @@ export default function ProcessGrid({ roots, rules, processHistory = {}, systemT
                 history={processHistory[historyKey(child.name)]}
                 onClick={() => onSelect(child)}
                 onAnalyze={() => onAnalyze(child)}
+                analyzeDisabled={!aiAvailable}
+                aiSetupPhase={aiSetupPhase}
               />
             ))}
           </div>
@@ -256,6 +272,8 @@ export default function ProcessGrid({ roots, rules, processHistory = {}, systemT
                                   rules={rules}
                                   onSelect={onSelect}
                                   onAnalyze={onAnalyze}
+                                  aiAvailable={aiAvailable}
+                                  aiSetupPhase={aiSetupPhase}
                                 />
                               ))}
                             </div>

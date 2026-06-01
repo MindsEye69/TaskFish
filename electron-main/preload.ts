@@ -18,6 +18,12 @@ contextBridge.exposeInMainWorld("electron", {
     ipcRenderer.on("pull-progress", handler);
     return () => ipcRenderer.removeListener("pull-progress", handler);
   },
+  onAiSetupStatus: (cb: (status: any) => void) => {
+    const handler = (_: Electron.IpcRendererEvent, data: any) => cb(data);
+    ipcRenderer.on("ai-setup-status", handler);
+    return () => ipcRenderer.removeListener("ai-setup-status", handler);
+  },
+  getAiStatus: () => ipcRenderer.invoke("get-ai-status"),
   getStartupInfo: (name: string) => ipcRenderer.invoke("get-startup-info", name),
   getRules: () => ipcRenderer.invoke("get-rules"),
   saveRule: (name: string, config: any) => ipcRenderer.invoke("save-rule", { name, config }),

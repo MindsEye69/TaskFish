@@ -1,6 +1,6 @@
 "use client";
 import { useCallback, useEffect, useRef, useState, useMemo } from "react";
-import type { AnalysisResult, ProcessInfo, TreeNode, RuleConfig, ProcessProfile } from "@/lib/types";
+import type { AnalysisResult, ProcessInfo, TreeNode, RuleConfig, ProcessProfile, AiSetupPhase } from "@/lib/types";
 import { MANUAL_PROFILE_ID } from "@/lib/profiles";
 import { buildTree, findNode, groupNodes } from "@/lib/processTree";
 import Header from "@/components/Header";
@@ -74,6 +74,9 @@ export default function Home() {
   const [profiles, setProfiles] = useState<ProcessProfile[]>([]);
   const [activeProfileId, setActiveProfileId] = useState(MANUAL_PROFILE_ID);
   const [aiAvailable, setAiAvailable] = useState(false);
+  const [aiSetupPhase, setAiSetupPhase] = useState<AiSetupPhase>("idle");
+  const [aiSetupError, setAiSetupError] = useState<string | undefined>();
+  const [aiPullProgress, setAiPullProgress] = useState<{ completed: number; total: number } | null>(null);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
 
   
@@ -190,19 +193,32 @@ export default function Home() {
   const refreshAiAvailability = useCallback(async () => {
     try {
       if (window.electron) {
-        await window.electron.startAiService().catch(() => {});
-        const models = await window.electron.listModels();
-        setAiAvailable(models.length > 0);
-        return models.length > 0;
+        const status = await window.electron.getAiStatus?.() ?? { phase: "idle" };
+        const phase = (status.phase ?? "idle") as AiSetupPhase;
+        setAiSetupPhase(phase);
+        setAiSetupError(status.error);
+        if (phase === "ready") {
+          setAiAvailable(true);
+          return true;
+        }
+        if (phase === "idle") {
+          window.electron.startAiService().catch(() => {});
+        }
+        setAiAvailable(false);
+        return false;
       }
 
       const res = await fetch("/api/analyze/status");
       const data = await res.json() as { available?: boolean };
       const available = data.available === true;
       setAiAvailable(available);
+      setAiSetupPhase(available ? "ready" : "error");
+      setAiSetupError(available ? undefined : "Ollama is not running or no model is installed");
       return available;
     } catch {
       setAiAvailable(false);
+      setAiSetupPhase("error");
+      setAiSetupError("AI status check failed");
       return false;
     }
   }, []);
@@ -532,6 +548,30 @@ export default function Home() {
   }, [fetchStats, graphPollMs]);
 
   useEffect(() => {
+    if (!window.electron) return;
+    const unsubStatus = window.electron.onAiSetupStatus?.((status) => {
+      const phase = status.phase as AiSetupPhase;
+      setAiSetupPhase(phase);
+      setAiSetupError(status.error);
+      if (phase === "ready") setAiAvailable(true);
+      else setAiAvailable(false);
+    });
+    const unsubProgress = window.electron.onPullProgress?.((progress) => {
+      if (!progress.total || progress.status === "success") {
+        setAiPullProgress(null);
+        return;
+      }
+      if (progress.completed != null && progress.total > 0) {
+        setAiPullProgress({ completed: progress.completed, total: progress.total });
+      }
+    });
+    return () => {
+      unsubStatus?.();
+      unsubProgress?.();
+    };
+  }, []);
+
+  useEffect(() => {
     refreshAiAvailability();
   }, [refreshAiAvailability]);
 
@@ -608,7 +648,11 @@ export default function Home() {
 
     const available = await refreshAiAvailability();
     if (!available) {
-      showToast("AI unavailable - install/start Ollama and pull a model");
+      const message =
+        aiSetupPhase === "pulling" ? "AI model is still downloading" :
+        aiSetupPhase === "starting" ? "AI engine is starting" :
+        aiSetupError || "AI unavailable - install/start Ollama and pull a model";
+      showToast(message);
       return;
     }
 
@@ -683,7 +727,6 @@ export default function Home() {
       await Promise.all(Array.from({ length: Math.min(3, toScan.length) }, worker));
     } finally {
       if (window.electron) {
-        await window.electron.stopAiService();
         await window.electron.writeScanLog(newResults);
       }
 
@@ -699,7 +742,7 @@ export default function Home() {
     showToast(`Batch scan complete - ${newResults.length} processes analyzed`);
     sendNotification("TaskFish Batch Scan", `${newResults.length} process analysis result(s) are ready.`);
     fetchProcesses();
-  }, [processes, isScanning, fetchProcesses, fetchRules, addAuditEvent, sendNotification, refreshAiAvailability, showToast]);
+  }, [processes, isScanning, fetchProcesses, fetchRules, addAuditEvent, sendNotification, refreshAiAvailability, showToast, aiSetupError, aiSetupPhase]);
 
   const handleGameMode = useCallback(async () => {
     const limitedGroups = groups.filter(g => {
@@ -756,6 +799,19 @@ export default function Home() {
     setSelected(fresh ?? node);
   }, [roots, groups]);
 
+  const openAnalysis = useCallback((name: string, pid: number) => {
+    if (!aiAvailable) {
+      const message =
+        aiSetupPhase === "pulling" ? "AI model is still downloading" :
+        aiSetupPhase === "starting" ? "AI engine is starting" :
+        aiSetupError || "AI setup is unavailable";
+      showToast(message);
+      return;
+    }
+    setAnalysisTarget({ name, pid });
+    setAnalyzeKey(k => k + 1);
+  }, [aiAvailable, aiSetupError, aiSetupPhase, showToast]);
+
   const banCount = useMemo(() => Object.values(rules).filter(r => r.action === "BAN").length, [rules]);
 
   const displayedGroups = useMemo(() => {
@@ -788,6 +844,7 @@ export default function Home() {
         isScanning={isScanning}
         scanProgress={scanProgress}
         aiAvailable={aiAvailable}
+        aiSetupPhase={aiSetupPhase}
         onOpenSettings={() => setShowSettings(true)}
         rulesActive={rulesActive}
         onToggleRules={handleToggleRules}
@@ -813,6 +870,75 @@ export default function Home() {
           WebkitAppRegion: "no-drag",
         } as React.CSSProperties}>
           {toastMessage}
+        </div>
+      )}
+
+      {/* AI setup progress overlay */}
+      {(aiSetupPhase === "starting" || aiSetupPhase === "pulling") && (
+        <div style={{
+          position: "fixed", top: "80px", left: "24px",
+          background: "var(--bg-card)", border: "1px solid rgba(168,85,247,0.4)",
+          borderRadius: "12px", zIndex: 1001, boxShadow: "0 8px 32px rgba(0,0,0,0.5)",
+          padding: "14px 16px", display: "flex", flexDirection: "column", gap: "8px",
+          width: "280px", WebkitAppRegion: "no-drag",
+        } as React.CSSProperties}>
+          <span style={{ fontWeight: 700, fontSize: "13px", color: "#a855f7" }}>
+            {aiSetupPhase === "starting" ? "Starting AI engine..." : "Downloading AI model..."}
+          </span>
+          {aiSetupPhase === "pulling" && (
+            <>
+              <div style={{ fontSize: "12px", color: "var(--text-muted)" }}>
+                {aiPullProgress && aiPullProgress.total > 0
+                  ? `${(aiPullProgress.completed / 1024 / 1024).toFixed(0)} / ${(aiPullProgress.total / 1024 / 1024).toFixed(0)} MB`
+                  : "llama3.2:1b (~1.3 GB) — first-run setup"}
+              </div>
+              <div style={{ height: "4px", background: "rgba(255,255,255,0.06)", borderRadius: "2px", overflow: "hidden" }}>
+                <div style={{
+                  height: "100%", background: "#a855f7", borderRadius: "2px",
+                  width: `${aiPullProgress && aiPullProgress.total > 0 ? Math.round((aiPullProgress.completed / aiPullProgress.total) * 100) : 5}%`,
+                  transition: "width 0.5s ease",
+                }} />
+              </div>
+              <div style={{ fontSize: "11px", color: "var(--text-dim)" }}>
+                Scan &amp; Analyze will be ready when download completes
+              </div>
+            </>
+          )}
+        </div>
+      )}
+
+      {aiSetupPhase === "error" && (
+        <div style={{
+          position: "fixed", top: "80px", left: "24px",
+          background: "var(--bg-card)", border: "1px solid rgba(248,113,113,0.45)",
+          borderRadius: "12px", zIndex: 1001, boxShadow: "0 8px 32px rgba(0,0,0,0.5)",
+          padding: "14px 16px", display: "flex", flexDirection: "column", gap: "8px",
+          width: "300px", WebkitAppRegion: "no-drag",
+        } as React.CSSProperties}>
+          <span style={{ fontWeight: 700, fontSize: "13px", color: "#f87171" }}>
+            AI setup needs attention
+          </span>
+          <span style={{ fontSize: "12px", color: "var(--text-muted)", lineHeight: 1.45 }}>
+            {aiSetupError || "TaskFish could not start Ollama or install the default AI model."}
+          </span>
+          <button
+            type="button"
+            onClick={() => {
+              setAiSetupPhase("starting");
+              setAiSetupError(undefined);
+              window.electron?.startAiService().catch(() => {
+                setAiSetupPhase("error");
+                setAiSetupError("AI setup retry failed");
+              });
+            }}
+            style={{
+              marginTop: "2px", alignSelf: "flex-start", border: "1px solid rgba(248,113,113,0.35)",
+              background: "rgba(248,113,113,0.1)", color: "#fca5a5", borderRadius: "8px",
+              padding: "6px 10px", fontSize: "12px", fontWeight: 700, cursor: "pointer",
+            }}
+          >
+            Retry setup
+          </button>
         </div>
       )}
 
@@ -911,8 +1037,7 @@ export default function Home() {
                           setShowScanReport(false);
                           const matchingProc = processes.find(p => p.name.toLowerCase() === r.name.toLowerCase());
                           const pid = matchingProc ? matchingProc.id : 0;
-                          setAnalysisTarget({ name: r.name, pid });
-                          setAnalyzeKey(k => k + 1);
+                          openAnalysis(r.name, pid);
                         }}
                       >
                         {r.name}
@@ -1008,8 +1133,10 @@ export default function Home() {
               setSelected(node);
               setView("map");
             }}
-            onAnalyze={(node) => { setAnalysisTarget({ name: node.name, pid: node.id }); setAnalyzeKey(k => k + 1); }}
+            onAnalyze={(node) => openAnalysis(node.name, node.id)}
             onQuickVerify={(node) => handleRuleChange(node.name, { action: "ALLOW", autoKillMins: null })}
+            aiAvailable={aiAvailable}
+            aiSetupPhase={aiSetupPhase}
           />
         ) : view === "map" ? (
           selected && (
@@ -1023,7 +1150,9 @@ export default function Home() {
                 setProcesses((prev) => prev.filter((p) => !idSet.has(p.id)));
                 fetchProcesses();
               }}
-              onAnalyze={(node) => { setAnalysisTarget({ name: node.name, pid: node.id }); setAnalyzeKey(k => k + 1); }}
+              onAnalyze={(node) => openAnalysis(node.name, node.id)}
+              aiAvailable={aiAvailable}
+              aiSetupPhase={aiSetupPhase}
             />
           )
         ) : (
@@ -1032,10 +1161,7 @@ export default function Home() {
             runningProcesses={processes}
             auditEvents={auditEvents}
             onRemoveRule={(name) => handleRuleChange(name, { action: "NONE", autoKillMins: null })}
-            onAnalyze={(name, pid) => {
-              setAnalysisTarget({ name, pid });
-              setAnalyzeKey(k => k + 1);
-            }}
+            onAnalyze={openAnalysis}
             profiles={profiles}
             activeProfileId={activeProfileId}
             onApplyProfile={handleApplyProfile}
@@ -1055,6 +1181,9 @@ export default function Home() {
           onClose={() => setAnalysisTarget(null)}
           auditEvents={auditEvents}
           processHistory={processHistory[normalizeName(analysisTarget.name)] ?? []}
+          aiAvailable={aiAvailable}
+          aiSetupPhase={aiSetupPhase}
+          aiSetupError={aiSetupError}
         />
       )}
 

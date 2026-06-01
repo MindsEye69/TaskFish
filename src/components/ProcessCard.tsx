@@ -1,7 +1,7 @@
 "use client";
 import { useState, useMemo } from "react";
 import IconImage from "./IconImage";
-import type { TreeNode, RuleConfig } from "@/lib/types";
+import type { TreeNode, RuleConfig, AiSetupPhase } from "@/lib/types";
 import { countAllPids } from "@/lib/processTree";
 import styles from "./ProcessCard.module.css";
 
@@ -17,6 +17,8 @@ interface Props {
   isExpanded?: boolean;
   featured?: boolean;
   history?: { cpu: number; ram: number }[];
+  analyzeDisabled?: boolean;
+  aiSetupPhase?: AiSetupPhase;
 }
 
 const TRUST_LABEL: Record<string, string> = {
@@ -36,7 +38,21 @@ const CATEGORY_RGB: Record<string, string> = {
 
 const GLOW_MAX_MB = 1200;
 
-export default function ProcessCard({ node, maxRam, rule, onClick, onAnalyze, onExpand, onQuickVerify, isExpandable, isExpanded, featured, history = [] }: Props) {
+export default function ProcessCard({
+  node,
+  maxRam,
+  rule,
+  onClick,
+  onAnalyze,
+  onExpand,
+  onQuickVerify,
+  isExpandable,
+  isExpanded,
+  featured,
+  history = [],
+  analyzeDisabled = false,
+  aiSetupPhase = "idle",
+}: Props) {
   const [iconError, setIconError] = useState(false);
   const ramPct = Math.min(100, (node.ramMB / Math.max(maxRam, 1)) * 100);
   const childCount = useMemo(() => countAllPids(node) - 1, [node]);
@@ -171,9 +187,19 @@ export default function ProcessCard({ node, maxRam, rule, onClick, onAnalyze, on
         {onAnalyze && (
           <button
             className={styles.analyzeBtn}
+            disabled={analyzeDisabled}
+            title={
+              analyzeDisabled
+                ? aiSetupPhase === "pulling"
+                  ? "Downloading AI model"
+                  : aiSetupPhase === "starting"
+                    ? "Starting AI engine"
+                    : "AI setup unavailable"
+                : "Analyze process"
+            }
             onClick={(e) => { e.stopPropagation(); onAnalyze(e); }}
           >
-            Analyze
+            {analyzeDisabled && aiSetupPhase === "pulling" ? "Setting up" : "Analyze"}
           </button>
         )}
       </div>

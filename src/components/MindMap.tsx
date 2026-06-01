@@ -1,6 +1,6 @@
 "use client";
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { ProcessInfo, TreeNode } from "@/lib/types";
+import type { ProcessInfo, TreeNode, AiSetupPhase } from "@/lib/types";
 import { findNode, collectTree } from "@/lib/processTree";
 import styles from "./MindMap.module.css";
 
@@ -11,6 +11,8 @@ interface Props {
   onNavigate: (node: TreeNode) => void;
   onAnalyze: (node: TreeNode) => void;
   onKilled: (ids: number[]) => void;
+  aiAvailable?: boolean;
+  aiSetupPhase?: AiSetupPhase;
 }
 
 function useSize(ref: React.RefObject<HTMLDivElement | null>) {
@@ -27,7 +29,16 @@ function useSize(ref: React.RefObject<HTMLDivElement | null>) {
   return size;
 }
 
-export default function MindMap({ selected, allProcesses, roots, onNavigate, onAnalyze, onKilled }: Props) {
+export default function MindMap({
+  selected,
+  allProcesses,
+  roots,
+  onNavigate,
+  onAnalyze,
+  onKilled,
+  aiAvailable = true,
+  aiSetupPhase = "idle",
+}: Props) {
   const wrapRef = useRef<HTMLDivElement>(null);
   const { w, h } = useSize(wrapRef);
   const [killing, setKilling] = useState(false);
@@ -175,8 +186,21 @@ export default function MindMap({ selected, allProcesses, roots, onNavigate, onA
         </div>
 
         <div className={styles.centerActions}>
-          <button className={styles.analyzeBtn} onClick={() => onAnalyze(selected)}>
-            Analyze
+          <button
+            className={styles.analyzeBtn}
+            disabled={!aiAvailable}
+            title={
+              !aiAvailable
+                ? aiSetupPhase === "pulling"
+                  ? "Downloading AI model"
+                  : aiSetupPhase === "starting"
+                    ? "Starting AI engine"
+                    : "AI setup unavailable"
+                : "Analyze process"
+            }
+            onClick={() => onAnalyze(selected)}
+          >
+            {!aiAvailable && aiSetupPhase === "pulling" ? "Setting up" : "Analyze"}
           </button>
           {isSafeToKill && (
             <button

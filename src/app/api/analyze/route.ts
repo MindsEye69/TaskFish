@@ -2,8 +2,9 @@ import { NextResponse } from "next/server";
 import { loadJson, saveJson } from "../api-helper";
 import { getTrust, getCategory } from "@/lib/trust";
 
-const MODEL_PREFERENCE = ["gemma3:4b", "gemma2:2b", "llama3.2:3b", "llama3.2:1b", "mistral", "phi3:mini", "llama2"];
-const RECOMMENDED_MODEL = "gemma3:4b";
+const DEFAULT_MODEL = "llama3.2:1b";
+const MODEL_PREFERENCE = [DEFAULT_MODEL, "llama3.2:3b", "gemma3:4b", "gemma2:2b", "mistral", "phi3:mini", "llama2"];
+const RECOMMENDED_MODEL = DEFAULT_MODEL;
 
 function offlineAnalysis(name: string) {
   const trust = getTrust(name);

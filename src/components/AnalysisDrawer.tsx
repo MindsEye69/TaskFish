@@ -1,7 +1,7 @@
 "use client";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import IconImage from "./IconImage";
-import type { AnalysisResult, RuleConfig, RuleAction, TrustLevel } from "@/lib/types";
+import type { AnalysisResult, RuleConfig, RuleAction, TrustLevel, AiSetupPhase } from "@/lib/types";
 import styles from "./AnalysisDrawer.module.css";
 
 type AuditEvent = { id: string; ts: number; type: string; message: string; details?: unknown };
@@ -83,7 +83,12 @@ interface Props {
   onClose: () => void;
   auditEvents?: AuditEvent[];
   processHistory?: { cpu: number; ram: number }[];
+  aiAvailable?: boolean;
+  aiSetupPhase?: AiSetupPhase;
+  aiSetupError?: string;
 }
+
+const DEFAULT_MODEL = "llama3.2:1b";
 
 export default function AnalysisDrawer({
   processName,
@@ -94,6 +99,9 @@ export default function AnalysisDrawer({
   onClose,
   auditEvents = [],
   processHistory = [],
+  aiAvailable = true,
+  aiSetupPhase = "ready",
+  aiSetupError,
 }: Props) {
   const [result, setResult]             = useState<AnalysisResult | null>(null);
   const [loading, setLoading]           = useState(false);
@@ -128,6 +136,14 @@ export default function AnalysisDrawer({
 
   const runAI = useCallback(async () => {
     if (!processName) return;
+    if (!aiAvailable) {
+      const detail =
+        aiSetupPhase === "pulling" ? `Downloading ${DEFAULT_MODEL}. Analysis will be ready when setup completes.` :
+        aiSetupPhase === "starting" ? "Starting the bundled AI engine. Try again in a moment." :
+        aiSetupError || "AI setup is unavailable.";
+      setResult({ error: detail, recommendedModel: DEFAULT_MODEL, _isError: true } as any);
+      return;
+    }
     let res: any;
     try {
       if (window.electron) {
@@ -156,12 +172,12 @@ export default function AnalysisDrawer({
     }
     // Essential always locks; otherwise keep the user's manual-control preference.
     setIsLocked(res.verdict === "essential" ? true : !(currentRuleRef.current?.manualControl ?? false));
-  }, [processName]); // stable — rule state accessed via refs
+  }, [aiAvailable, aiSetupError, aiSetupPhase, processName]); // rule state is accessed via refs
 
   const handleDownload = useCallback(async () => {
     if (!window.electron || !processName) return;
     const res = result as any;
-    const modelName: string = res?.recommendedModel ?? "gemma3:4b";
+    const modelName: string = res?.recommendedModel ?? DEFAULT_MODEL;
 
     setDownloading(true);
     setPullStatus("Connecting to Ollama…");
@@ -324,8 +340,7 @@ export default function AnalysisDrawer({
     load()
       .catch(e => setResult({ error: String(e), _isError: true } as any))
       .finally(() => setLoading(false));
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [processName]); // runAI is stable per processName; intentionally omitted from deps
+  }, [processName, runAI]);
 
   const handleActionClick = (action: RuleAction) => {
     if (!onRuleChange || !processName || isLocked) return;
@@ -360,7 +375,7 @@ export default function AnalysisDrawer({
   // Derived error state — avoids type-unsafe casts scattered through JSX
   const errResult   = result && (result as any)._isError ? (result as any) : null;
   const errMsg      = errResult ? String(errResult.error ?? "Unknown error") : "";
-  const recModel    = errResult ? (errResult.recommendedModel ?? "gemma3:4b") : "gemma3:4b";
+  const recModel    = errResult ? (errResult.recommendedModel ?? DEFAULT_MODEL) : DEFAULT_MODEL;
   const modelMissing = errResult ? /not found|pull|model/i.test(errMsg) : false;
   const notRunning   = errResult ? /ECONNREFUSED|reach|unavailable|running/i.test(errMsg) : false;
 

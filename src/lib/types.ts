@@ -1,6 +1,13 @@
 export type TrustLevel = "trusted" | "verified" | "background" | "unknown";
 export type Category = "system" | "user" | "background" | "unknown";
 export type RuleAction = "ALLOW" | "BAN" | "LIMITED" | "NONE";
+export type AiSetupPhase = "idle" | "starting" | "pulling" | "ready" | "error";
+
+export interface AiSetupStatus {
+  phase: AiSetupPhase;
+  model?: string;
+  error?: string;
+}
 
 export interface RuleConfig {
   action: RuleAction;
@@ -72,12 +79,14 @@ declare global {
       getProcesses: () => Promise<any>;
       getIcon: (name: string) => Promise<string>;
       killProcess: (pid: number, killTree: boolean) => Promise<void>;
-      startAiService: () => Promise<void>;
+      startAiService: () => Promise<boolean>;
       stopAiService: () => Promise<void>;
       analyzeProcess: (name: string) => Promise<AnalysisResult & { error?: string; recommendedModel?: string }>;
       listModels: () => Promise<string[]>;
       pullModel: (modelName: string) => Promise<{ ok: boolean; error?: string }>;
       onPullProgress: (cb: (progress: { status?: string; digest?: string; total?: number; completed?: number }) => void) => () => void;
+      onAiSetupStatus: (cb: (status: AiSetupStatus) => void) => () => void;
+      getAiStatus: () => Promise<AiSetupStatus>;
       getStartupInfo: (name: string) => Promise<{ isStartupApp: boolean }>;
       getRules: () => Promise<Record<string, RuleConfig>>;
       saveRule: (name: string, config: RuleConfig) => Promise<void>;

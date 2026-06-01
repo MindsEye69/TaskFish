@@ -2,7 +2,7 @@
 import { useState, useRef, useEffect } from "react";
 import IconImage from "./IconImage";
 import type { VendorGroup } from "@/lib/vendors";
-import type { RuleConfig, TreeNode } from "@/lib/types";
+import type { RuleConfig, TreeNode, AiSetupPhase } from "@/lib/types";
 import styles from "./VendorBadge.module.css";
 
 interface Props {
@@ -11,6 +11,8 @@ interface Props {
   rules: Record<string, RuleConfig>;
   onSelect: (node: TreeNode) => void;
   onAnalyze: (node: TreeNode) => void;
+  aiAvailable?: boolean;
+  aiSetupPhase?: AiSetupPhase;
 }
 
 const TRUST_COLOR: Record<string, string> = {
@@ -24,7 +26,15 @@ function fmtRam(mb: number) {
   return mb >= 1024 ? `${(mb / 1024).toFixed(1)} GB` : `${Math.round(mb)} MB`;
 }
 
-export default function VendorBadge({ group, systemTotalRam, rules, onSelect, onAnalyze }: Props) {
+export default function VendorBadge({
+  group,
+  systemTotalRam,
+  rules,
+  onSelect,
+  onAnalyze,
+  aiAvailable = true,
+  aiSetupPhase = "idle",
+}: Props) {
   const [expanded, setExpanded] = useState(false);
   const [iconError, setIconError] = useState(false);
   const dropdownRef = useRef<HTMLDivElement>(null);
@@ -181,6 +191,16 @@ export default function VendorBadge({ group, systemTotalRam, rules, onSelect, on
                     )}
                     <button
                       className={styles.analyzeBtn}
+                      disabled={!aiAvailable}
+                      title={
+                        !aiAvailable
+                          ? aiSetupPhase === "pulling"
+                            ? "Downloading AI model"
+                            : aiSetupPhase === "starting"
+                              ? "Starting AI engine"
+                              : "AI setup unavailable"
+                          : "Analyze process"
+                      }
                       onClick={e => { e.stopPropagation(); onAnalyze(proc); }}
                     >
                       ›

@@ -24,6 +24,7 @@ interface Props {
   isScanning?: boolean;
   scanProgress?: { current: number; total: number; name: string };
   aiAvailable?: boolean;
+  aiSetupPhase?: "idle" | "starting" | "pulling" | "ready" | "error";
   onOpenSettings: () => void;
   rulesActive?: boolean;
   onToggleRules?: () => void;
@@ -52,6 +53,7 @@ export default function Header({
   isScanning = false,
   scanProgress = { current: 0, total: 0, name: "" },
   aiAvailable = true,
+  aiSetupPhase = "idle",
   onOpenSettings,
   rulesActive = true,
   onToggleRules,
@@ -140,12 +142,18 @@ export default function Header({
               onClick={() => onDeepScan()}
               disabled={isScanning || !aiAvailable || unknownCount === 0}
               title={
-                !aiAvailable ? "AI unavailable — install/start Ollama and pull a model" :
-                unknownCount === 0 ? "No unknown processes to scan" :
-                "Analyze all unknown processes"
+                (aiSetupPhase === "starting" || aiSetupPhase === "pulling")
+                  ? aiSetupPhase === "pulling" ? "Downloading AI model — scan ready when complete" : "Starting AI engine…"
+                  : !aiAvailable ? "AI unavailable — install/start Ollama and pull a model"
+                  : unknownCount === 0 ? "No unknown processes to scan"
+                  : "Analyze all unknown processes"
               }
             >
-              {isScanning ? `Scanning ${scanProgress.current}/${scanProgress.total}` : "Scan Unknowns"}
+              {isScanning
+                ? `Scanning ${scanProgress.current}/${scanProgress.total}`
+                : (aiSetupPhase === "starting" || aiSetupPhase === "pulling") && !aiAvailable
+                  ? aiSetupPhase === "pulling" ? "Downloading AI..." : "Starting AI..."
+                  : "Scan Unknowns"}
             </button>
             <button
               type="button"
