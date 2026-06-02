@@ -526,7 +526,7 @@
   font-variant-numeric: tabular-nums;
 }
 
-/* ─── Windows Event Health Panel ─── */
+/* Windows Event Health Panel */
 
 .eventHealthPane {
   background: rgba(255, 255, 255, 0.01);
@@ -760,4 +760,209 @@
   line-height: 1.5;
   white-space: pre-wrap;
   word-break: break-word;
+}
+
+/* AI Event Health Findings */
+
+.analyzeBtn {
+  padding: 7px 16px;
+  border-radius: 8px;
+  border: 1.5px solid rgba(168, 85, 247, 0.24);
+  background: rgba(168, 85, 247, 0.08);
+  color: #a855f7;
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  flex-shrink: 0;
+}
+.analyzeBtn:hover:not(:disabled) {
+  background: rgba(168, 85, 247, 0.16);
+  border-color: rgba(168, 85, 247, 0.4);
+}
+.analyzeBtn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.findingsSection {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+  padding-top: 14px;
+  margin-top: 4px;
+}
+
+.findingsHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.modelBadge {
+  font-size: 10px;
+  font-weight: 700;
+  padding: 3px 10px;
+  border-radius: 999px;
+  background: rgba(168, 85, 247, 0.12);
+  border: 1px solid rgba(168, 85, 247, 0.24);
+  color: #a855f7;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 220px;
+}
+
+.findingSummary {
+  font-size: 12px;
+  color: var(--text-muted);
+  line-height: 1.6;
+  margin: 0;
+  padding: 10px 14px;
+  background: rgba(168, 85, 247, 0.04);
+  border-radius: 8px;
+  border: 1px solid rgba(168, 85, 247, 0.12);
+}
+
+.findingList {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.findingCard {
+  background: rgba(255, 255, 255, 0.01);
+  border: 1px solid rgba(255, 255, 255, 0.05);
+  border-radius: 8px;
+  overflow: hidden;
+  transition: border-color 0.15s;
+}
+.findingCard:hover {
+  border-color: rgba(255, 255, 255, 0.1);
+}
+
+.findingMain {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 12px;
+  flex-wrap: wrap;
+}
+
+.severityCritical {
+  font-size: 9px;
+  font-weight: 800;
+  padding: 2px 7px;
+  border-radius: 999px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  flex-shrink: 0;
+  background: rgba(239, 68, 68, 0.15);
+  color: #ef4444;
+}
+
+.severityWarning {
+  font-size: 9px;
+  font-weight: 800;
+  padding: 2px 7px;
+  border-radius: 999px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  flex-shrink: 0;
+  background: rgba(245, 158, 11, 0.12);
+  color: #f59e0b;
+}
+
+.severityInfo {
+  font-size: 9px;
+  font-weight: 800;
+  padding: 2px 7px;
+  border-radius: 999px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  flex-shrink: 0;
+  background: rgba(148, 163, 184, 0.08);
+  color: #94a3b8;
+}
+
+.confText {
+  font-size: 10px;
+  color: var(--text-dim);
+  flex-shrink: 0;
+  font-weight: 600;
+}
+
+.findingId {
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--text-dim);
+  font-family: monospace;
+  flex-shrink: 0;
+}
+
+.findingExplanation {
+  font-size: 12px;
+  color: var(--text);
+  flex: 1;
+}
+
+.findingDetail {
+  padding: 10px 14px 12px;
+  border-top: 1px solid rgba(255, 255, 255, 0.05);
+  background: rgba(0, 0, 0, 0.1);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  font-size: 11px;
+}
+
+.findingDetailSection {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.findingDetailTitle {
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.findingDetailList {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.findingDetailList li {
+  color: var(--text-muted);
+  padding-left: 14px;
+  position: relative;
+  line-height: 1.5;
+}
+
+.findingDetailList li::before {
+  content: "-";
+  position: absolute;
+  left: 4px;
+  color: var(--text-dim);
+}
+
+.findingIgnore {
+  font-size: 11px;
+  color: var(--text-dim);
+  font-style: italic;
+  line-height: 1.5;
+  padding: 6px 10px;
+  background: rgba(255, 255, 255, 0.02);
+  border-radius: 6px;
 }

@@ -33,6 +33,7 @@ export interface EventHealthReport {
   clusters: EventCluster[];
   importedAt: number;
   fileName: string;
+  fileHash?: string;
 }
 
 const KNOWN_EVENTS: Record<string, string> = {
@@ -138,6 +139,25 @@ export function parseWevtutilXml(xml: string): EventLogEntry[] {
   }
 
   return entries;
+}
+
+export interface EventHealthFinding {
+  clusterId: string;
+  severity: "critical" | "warning" | "info";
+  confidence: "high" | "medium" | "low";
+  explanation: string;
+  evidence: string[];
+  safeNextSteps: string[];
+  whenToIgnore: string;
+}
+
+export interface EventHealthAnalysis {
+  overallHealth: "good" | "watch" | "attention" | "urgent";
+  summary: string;
+  findings: EventHealthFinding[];
+  analyzedAt: number;
+  model: string | null;
+  offline: boolean;
 }
 
 export function clusterEvents(entries: EventLogEntry[], fileName: string): EventHealthReport {

@@ -1,6 +1,7 @@
 import { app, BrowserWindow, Notification, ipcMain, Menu, Tray, nativeImage, WebContents, dialog } from "electron";
 import path from "path";
 import fs from "fs";
+import crypto from "crypto";
 import { spawn, exec, execFile, ChildProcess } from "child_process";
 import { getTrust, getCategory } from "../src/lib/trust";
 import { createProfileId, ensureProfilesData, findProfile, normalizeProfileRules } from "../src/lib/profiles";
@@ -1381,6 +1382,7 @@ ipcMain.handle("import-event-log", async () => {
   const fileName = path.basename(filePath);
 
   try {
+    const fileHash = crypto.createHash("sha256").update(fs.readFileSync(filePath)).digest("hex");
     const { stdout } = await safeExecFile(
       "wevtutil",
       ["qe", filePath, "/lf:true", "/f:xml", "/c:2000"],
@@ -1389,11 +1391,13 @@ ipcMain.handle("import-event-log", async () => {
 
     const entries = parseWevtutilXml(stdout);
     const report = clusterEvents(entries, fileName);
+    report.fileHash = fileHash;
 
     appendAudit("event-log", `Imported event log: ${fileName}`, {
       totalEvents: report.totalEvents,
       health: report.overallHealth,
       clusters: report.clusters.length,
+      fileHash,
     });
 
     return { ok: true, report };

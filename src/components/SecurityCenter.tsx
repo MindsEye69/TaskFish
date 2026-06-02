@@ -1,7 +1,7 @@
 "use client";
 import { useState, useMemo, useCallback } from "react";
 import type { ProcessInfo, ProcessProfile, RuleConfig } from "@/lib/types";
-import type { EventHealthReport, EventCluster } from "@/lib/eventLog";
+import type { EventHealthReport, EventCluster, EventHealthAnalysis } from "@/lib/eventLog";
 import styles from "./SecurityCenter.module.css";
 
 type AuditEvent = { id: string; ts: number; type: string; message: string; details?: unknown };
@@ -79,6 +79,9 @@ export default function SecurityCenter({
   const [eventImportError, setEventImportError] = useState("");
   const [importingEvents, setImportingEvents] = useState(false);
   const [expandedClusters, setExpandedClusters] = useState<Set<string>>(new Set());
+  const [eventAnalysis, setEventAnalysis] = useState<EventHealthAnalysis | null>(null);
+  const [analyzingEvents, setAnalyzingEvents] = useState(false);
+  const [expandedFindings, setExpandedFindings] = useState<Set<string>>(new Set());
 
   const toggleCluster = useCallback((key: string) => {
     setExpandedClusters(prev => {
@@ -88,10 +91,20 @@ export default function SecurityCenter({
     });
   }, []);
 
+  const toggleFinding = useCallback((id: string) => {
+    setExpandedFindings(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+  }, []);
+
   const handleImportEventLog = useCallback(async () => {
     if (!window.electron?.importEventLog) return;
     setImportingEvents(true);
     setEventImportError("");
+    setEventAnalysis(null);
+    setExpandedFindings(new Set());
     try {
       const result = await window.electron.importEventLog();
       if (result.ok && result.report) {
@@ -105,6 +118,24 @@ export default function SecurityCenter({
       setImportingEvents(false);
     }
   }, []);
+
+  const handleAnalyzeEvents = useCallback(async () => {
+    if (!eventReport || analyzingEvents) return;
+    setAnalyzingEvents(true);
+    try {
+      const res = await fetch("/api/event-health-analyze", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ report: eventReport }),
+      });
+      if (res.ok) {
+        const data = await res.json() as EventHealthAnalysis & { error?: string };
+        if (!data.error) setEventAnalysis(data);
+      }
+    } catch { /* ignore */ } finally {
+      setAnalyzingEvents(false);
+    }
+  }, [eventReport, analyzingEvents]);
 
   const totalRules = Object.keys(rules).filter(name => rules[name].action !== "NONE").length;
   const bannedCount = Object.values(rules).filter(r => r.action === "BAN").length;
@@ -145,9 +176,9 @@ export default function SecurityCenter({
   return (
     <div className={styles.container}>
       <div className={styles.header}>
-        <h1 className={styles.title}>🛡 Security & Safeguards Center</h1>
+        <h1 className={styles.title}>Security & Safeguards Center</h1>
         <div className={styles.safeguardBanner}>
-          <span className={styles.safeguardIcon}>🛡</span>
+          <span className={styles.safeguardIcon}>!</span>
           <div className={styles.safeguardInfo}>
             <div className={styles.safeguardTitle}>System Safeguards Active</div>
             <div className={styles.safeguardText}>
@@ -363,29 +394,41 @@ export default function SecurityCenter({
               </span>
             )}
           </div>
-          <button
-            type="button"
-            className={styles.importBtn}
-            disabled={importingEvents}
-            onClick={handleImportEventLog}
-          >
-            {importingEvents ? "Importing..." : "Import .evtx"}
-          </button>
+          <div style={{ display: "flex", gap: "8px" }}>
+            {eventReport && (
+              <button
+                type="button"
+                className={styles.analyzeBtn}
+                disabled={analyzingEvents}
+                onClick={handleAnalyzeEvents}
+              >
+                {analyzingEvents ? "Analyzing..." : eventAnalysis ? "Re-analyze" : "Analyze"}
+              </button>
+            )}
+            <button
+              type="button"
+              className={styles.importBtn}
+              disabled={importingEvents}
+              onClick={handleImportEventLog}
+            >
+              {importingEvents ? "Importing..." : "Import .evtx"}
+            </button>
+          </div>
         </div>
         {eventImportError && <div className={styles.errorText}>{eventImportError}</div>}
 
         {!eventReport ? (
           <div className={styles.emptyText}>
-            Import a saved Windows Event Viewer .evtx file to analyze it for issues, errors, and patterns — no AI required.
+            Import a saved Windows Event Viewer .evtx file to analyze it for issues, errors, and patterns. No AI required.
           </div>
         ) : (
           <div className={styles.eventReportBody}>
             <div className={styles.eventMeta}>
-              {eventReport.totalEvents.toLocaleString()} events &middot; {eventReport.fileName}
+              {eventReport.totalEvents.toLocaleString()} events - {eventReport.fileName}
               {eventReport.dateRange && (
-                <> &middot; {new Date(eventReport.dateRange.from).toLocaleDateString()} &ndash; {new Date(eventReport.dateRange.to).toLocaleDateString()}</>
+                <> - {new Date(eventReport.dateRange.from).toLocaleDateString()} to {new Date(eventReport.dateRange.to).toLocaleDateString()}</>
               )}
-              &middot; {eventReport.clusters.length} unique finding{eventReport.clusters.length !== 1 ? "s" : ""}
+              - {eventReport.clusters.length} unique finding{eventReport.clusters.length !== 1 ? "s" : ""}
             </div>
             <div className={styles.eventStats}>
               <span>Critical <strong>{eventReport.criticalCount.toLocaleString()}</strong></span>
@@ -415,7 +458,7 @@ export default function SecurityCenter({
                               {cluster.levelName}
                             </span>
                             <span className={styles.clusterProvider}>
-                              {cluster.provider.replace(/^Microsoft-Windows-/, "")}&nbsp;&middot;&nbsp;{cluster.eventId}
+                              {cluster.provider.replace(/^Microsoft-Windows-/, "")} - {cluster.eventId}
                             </span>
                             <span className={styles.clusterCount}>&times;{cluster.count}</span>
                             <span className={styles.clusterSummary}>{cluster.summary}</span>
@@ -425,7 +468,7 @@ export default function SecurityCenter({
                               onClick={() => toggleCluster(cluster.key)}
                               aria-label={isExpanded ? "Collapse" : "Expand"}
                             >
-                              {isExpanded ? "▲" : "▼"}
+                              {isExpanded ? "-" : "+"}
                             </button>
                           </div>
                           {isExpanded && (
@@ -449,6 +492,80 @@ export default function SecurityCenter({
                 </div>
               );
             })}
+
+            {eventAnalysis && (
+              <div className={styles.findingsSection}>
+                <div className={styles.findingsHeader}>
+                  <span style={{ fontSize: "14px", fontWeight: 700, color: "var(--text)" }}>Health Findings</span>
+                  <span className={styles.modelBadge}>
+                    {eventAnalysis.offline
+                      ? "Deterministic"
+                      : `AI - ${eventAnalysis.model ?? "unknown"}`}
+                  </span>
+                </div>
+                <p className={styles.findingSummary}>{eventAnalysis.summary}</p>
+                {eventAnalysis.findings.length === 0 ? (
+                  <div className={styles.emptyText}>No actionable findings identified.</div>
+                ) : (
+                  <div className={styles.findingList}>
+                    {eventAnalysis.findings.map(finding => {
+                      const isExpanded = expandedFindings.has(finding.clusterId);
+                      const sevClass =
+                        finding.severity === "critical" ? styles.severityCritical :
+                        finding.severity === "warning" ? styles.severityWarning :
+                        styles.severityInfo;
+                      return (
+                        <div key={finding.clusterId} className={styles.findingCard}>
+                          <div
+                            className={styles.findingMain}
+                            onClick={() => toggleFinding(finding.clusterId)}
+                            style={{ cursor: "pointer" }}
+                          >
+                            <span className={sevClass}>{finding.severity}</span>
+                            <span className={styles.confText}>{finding.confidence} conf</span>
+                            <span className={styles.findingId}>{finding.clusterId}</span>
+                            <span className={styles.findingExplanation}>{finding.explanation}</span>
+                            <button
+                              type="button"
+                              className={styles.expandBtn}
+                              onClick={e => { e.stopPropagation(); toggleFinding(finding.clusterId); }}
+                              aria-label={isExpanded ? "Collapse" : "Expand"}
+                            >
+                              {isExpanded ? "-" : "+"}
+                            </button>
+                          </div>
+                          {isExpanded && (
+                            <div className={styles.findingDetail}>
+                              {finding.evidence.length > 0 && (
+                                <div className={styles.findingDetailSection}>
+                                  <div className={styles.findingDetailTitle}>Evidence</div>
+                                  <ul className={styles.findingDetailList}>
+                                    {finding.evidence.map((e, i) => <li key={i}>{e}</li>)}
+                                  </ul>
+                                </div>
+                              )}
+                              {finding.safeNextSteps.length > 0 && (
+                                <div className={styles.findingDetailSection}>
+                                  <div className={styles.findingDetailTitle}>Safe Next Steps</div>
+                                  <ul className={styles.findingDetailList}>
+                                    {finding.safeNextSteps.map((s, i) => <li key={i}>{s}</li>)}
+                                  </ul>
+                                </div>
+                              )}
+                              {finding.whenToIgnore && (
+                                <div className={styles.findingIgnore}>
+                                  When to ignore: {finding.whenToIgnore}
+                                </div>
+                              )}
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            )}
           </div>
         )}
       </div>
