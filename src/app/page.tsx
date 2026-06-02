@@ -91,6 +91,7 @@ export default function Home() {
   const idleTrackerRef = useRef<Record<string, { lastCpu: number, idleSince: number }>>({});
   const isFetchingRef = useRef(false);
   const isStatsFetchingRef = useRef(false);
+  const aiSetupRequestedRef = useRef(false);
   const hasLoadedOnceRef = useRef(false);
   const notifiedUnknownRef = useRef<Set<string>>(new Set());
   const gameModePidsRef = useRef<Set<number>>(new Set());
@@ -190,19 +191,31 @@ export default function Home() {
     window.setTimeout(() => setToastMessage(null), 4000);
   }, []);
 
+  const startAiSetup = useCallback((force = false) => {
+    if (!window.electron?.startAiService) return;
+    if (aiSetupRequestedRef.current && !force) return;
+    aiSetupRequestedRef.current = true;
+    setAiSetupPhase("starting");
+    setAiSetupError(undefined);
+    setAiAvailable(false);
+    window.electron.startAiService().catch(() => {
+      setAiSetupPhase("error");
+      setAiSetupError("AI setup retry failed");
+      setAiAvailable(false);
+    });
+  }, []);
+
   const refreshAiAvailability = useCallback(async () => {
     try {
       if (window.electron) {
         const status = await window.electron.getAiStatus?.() ?? { phase: "idle" };
-        const phase = (status.phase ?? "idle") as AiSetupPhase;
+        const reportedPhase = (status.phase ?? "idle") as AiSetupPhase;
+        const phase = reportedPhase === "idle" && aiSetupRequestedRef.current ? "starting" : reportedPhase;
         setAiSetupPhase(phase);
         setAiSetupError(status.error);
         if (phase === "ready") {
           setAiAvailable(true);
           return true;
-        }
-        if (phase === "idle") {
-          window.electron.startAiService().catch(() => {});
         }
         setAiAvailable(false);
         return false;
@@ -573,7 +586,8 @@ export default function Home() {
 
   useEffect(() => {
     refreshAiAvailability();
-  }, [refreshAiAvailability]);
+    startAiSetup();
+  }, [refreshAiAvailability, startAiSetup]);
 
   useEffect(() => {
     if (view === "map" && selected) {
@@ -924,12 +938,7 @@ export default function Home() {
           <button
             type="button"
             onClick={() => {
-              setAiSetupPhase("starting");
-              setAiSetupError(undefined);
-              window.electron?.startAiService().catch(() => {
-                setAiSetupPhase("error");
-                setAiSetupError("AI setup retry failed");
-              });
+              startAiSetup(true);
             }}
             style={{
               marginTop: "2px", alignSelf: "flex-start", border: "1px solid rgba(248,113,113,0.35)",
@@ -1166,6 +1175,8 @@ export default function Home() {
             activeProfileId={activeProfileId}
             onApplyProfile={handleApplyProfile}
             onSaveProfile={handleSaveProfile}
+            aiAvailable={aiAvailable}
+            aiSetupPhase={aiSetupPhase}
           />
         )}
       </div>

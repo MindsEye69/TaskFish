@@ -1,6 +1,6 @@
 "use client";
 import { useState, useMemo, useCallback } from "react";
-import type { ProcessInfo, ProcessProfile, RuleConfig } from "@/lib/types";
+import type { AiSetupPhase, ProcessInfo, ProcessProfile, RuleConfig } from "@/lib/types";
 import type { EventHealthReport, EventCluster, EventHealthAnalysis } from "@/lib/eventLog";
 import styles from "./SecurityCenter.module.css";
 
@@ -16,6 +16,8 @@ interface Props {
   activeProfileId?: string;
   onApplyProfile?: (profileId: string) => void;
   onSaveProfile?: (name: string) => void;
+  aiAvailable?: boolean;
+  aiSetupPhase?: AiSetupPhase;
 }
 
 const HEALTH_LABELS: Record<string, string> = {
@@ -71,6 +73,8 @@ export default function SecurityCenter({
   activeProfileId = "manual",
   onApplyProfile,
   onSaveProfile,
+  aiAvailable = true,
+  aiSetupPhase = "ready",
 }: Props) {
   const [searchQuery, setSearchQuery] = useState("");
   const [filterAction, setFilterAction] = useState<"ALL" | "ALLOW" | "LIMITED" | "BAN">("ALL");
@@ -172,6 +176,12 @@ export default function SecurityCenter({
   }, [runningProcesses, rules]);
 
   const activeProfile = profiles.find(profile => profile.id === activeProfileId);
+  const aiSetupLabel =
+    aiSetupPhase === "pulling" ? "Setting up AI" :
+    aiSetupPhase === "starting" ? "Starting AI" :
+    aiSetupPhase === "error" ? "AI retry needed" :
+    "Analyze";
+  const processAnalyzeDisabled = !aiAvailable;
 
   return (
     <div className={styles.container}>
@@ -191,8 +201,14 @@ export default function SecurityCenter({
       {/* Windows Event Health */}
       <div className={styles.eventHealthPane}>
         <div className={styles.paneHeader}>
-          <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-            <span className={styles.paneTitle}>Windows Event Health</span>
+          <div className={styles.eventHealthIntro}>
+            <span className={styles.eventHealthKicker}>Windows Event Health</span>
+            <span className={styles.eventHealthTitle}>Import and review a saved .evtx event log</span>
+            <span className={styles.eventHealthStatus}>
+              {eventReport
+                ? `${eventReport.fileName} imported - ${eventReport.totalEvents.toLocaleString()} events clustered`
+                : "Ready for a Windows Event Viewer export. No live event scanning is used."}
+            </span>
             {eventReport && (
               <span
                 className={styles.healthBadge}
@@ -202,7 +218,7 @@ export default function SecurityCenter({
               </span>
             )}
           </div>
-          <div style={{ display: "flex", gap: "8px" }}>
+          <div className={styles.eventHealthActions}>
             {eventReport && (
               <button
                 type="button"
@@ -227,7 +243,7 @@ export default function SecurityCenter({
 
         {!eventReport ? (
           <div className={styles.emptyText}>
-            Import a saved Windows Event Viewer .evtx file to analyze it for issues, errors, and patterns. No AI required.
+            Import a saved Windows Event Viewer .evtx file to see deterministic clusters and optional AI-enhanced health findings here.
           </div>
         ) : (
           <div className={styles.eventReportBody}>
@@ -492,12 +508,15 @@ export default function SecurityCenter({
                       <button
                         type="button"
                         className={styles.btnAnalyze}
+                        disabled={processAnalyzeDisabled}
+                        title={processAnalyzeDisabled ? aiSetupLabel : "Analyze process"}
                         onClick={() => {
+                          if (processAnalyzeDisabled) return;
                           const proc = runningProcesses.find(p => p.name.toLowerCase() === rule.name.toLowerCase());
                           onAnalyze(rule.name, proc ? proc.id : 0);
                         }}
                       >
-                        Analyze
+                        {processAnalyzeDisabled ? aiSetupLabel : "Analyze"}
                       </button>
                       <button
                         type="button"
@@ -531,9 +550,11 @@ export default function SecurityCenter({
                   <button
                     type="button"
                     className={styles.btnInspect}
+                    disabled={processAnalyzeDisabled}
+                    title={processAnalyzeDisabled ? aiSetupLabel : "Inspect and analyze process"}
                     onClick={() => onAnalyze(proc.name, proc.id)}
                   >
-                    Inspect & Vett
+                    {processAnalyzeDisabled ? aiSetupLabel : "Inspect & Vett"}
                   </button>
                 </div>
               ))

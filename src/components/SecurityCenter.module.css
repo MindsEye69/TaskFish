@@ -360,9 +360,15 @@
   background: rgba(255, 255, 255, 0.04);
   color: var(--text-muted);
 }
-.btnAnalyze:hover {
+.btnAnalyze:hover:not(:disabled) {
   background: rgba(255, 255, 255, 0.08);
   color: var(--text);
+}
+
+.btnAnalyze:disabled,
+.btnInspect:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
 }
 
 .btnUnban {
@@ -431,7 +437,7 @@
   color: var(--background);
   flex-shrink: 0;
 }
-.btnInspect:hover {
+.btnInspect:hover:not(:disabled) {
   background: rgba(245, 158, 11, 0.16);
   border-color: rgba(245, 158, 11, 0.4);
 }
@@ -529,14 +535,50 @@
 /* Windows Event Health Panel */
 
 .eventHealthPane {
-  background: rgba(255, 255, 255, 0.01);
-  border: 1.5px solid var(--border);
+  background: linear-gradient(135deg, rgba(96, 165, 250, 0.09), rgba(168, 85, 247, 0.04)), rgba(255, 255, 255, 0.015);
+  border: 1.5px solid rgba(96, 165, 250, 0.28);
   border-radius: 14px;
-  padding: 20px;
+  padding: 22px;
   display: flex;
   flex-direction: column;
   gap: 16px;
-  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.15);
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.22);
+}
+
+.eventHealthIntro {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  min-width: 240px;
+}
+
+.eventHealthKicker {
+  font-size: 11px;
+  font-weight: 800;
+  color: #93c5fd;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.eventHealthTitle {
+  font-size: 17px;
+  font-weight: 800;
+  color: var(--text);
+  letter-spacing: 0;
+}
+
+.eventHealthStatus {
+  font-size: 12px;
+  color: var(--text-muted);
+  line-height: 1.45;
+}
+
+.eventHealthActions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+  justify-content: flex-end;
 }
 
 .healthBadge {
