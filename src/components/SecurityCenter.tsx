@@ -83,9 +83,18 @@ export default function SecurityCenter({
   const [eventImportError, setEventImportError] = useState("");
   const [importingEvents, setImportingEvents] = useState(false);
   const [expandedClusters, setExpandedClusters] = useState<Set<string>>(new Set());
+  const [expandedCategories, setExpandedCategories] = useState<Set<string>>(new Set(["needs-attention", "watch"]));
   const [eventAnalysis, setEventAnalysis] = useState<EventHealthAnalysis | null>(null);
   const [analyzingEvents, setAnalyzingEvents] = useState(false);
   const [expandedFindings, setExpandedFindings] = useState<Set<string>>(new Set());
+
+  const toggleCategory = useCallback((cat: string) => {
+    setExpandedCategories(prev => {
+      const next = new Set(prev);
+      if (next.has(cat)) next.delete(cat); else next.add(cat);
+      return next;
+    });
+  }, []);
 
   const toggleCluster = useCallback((key: string) => {
     setExpandedClusters(prev => {
@@ -124,18 +133,11 @@ export default function SecurityCenter({
   }, []);
 
   const handleAnalyzeEvents = useCallback(async () => {
-    if (!eventReport || analyzingEvents) return;
+    if (!eventReport || analyzingEvents || !window.electron?.analyzeEventHealth) return;
     setAnalyzingEvents(true);
     try {
-      const res = await fetch("/api/event-health-analyze", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ report: eventReport }),
-      });
-      if (res.ok) {
-        const data = await res.json() as EventHealthAnalysis & { error?: string };
-        if (!data.error) setEventAnalysis(data);
-      }
+      const data = await window.electron.analyzeEventHealth(eventReport);
+      if (!data.error) setEventAnalysis(data);
     } catch { /* ignore */ } finally {
       setAnalyzingEvents(false);
     }
@@ -265,13 +267,27 @@ export default function SecurityCenter({
             {(["needs-attention", "watch", "likely-noise"] as const).map(cat => {
               const catClusters: EventCluster[] = eventReport.clusters.filter(c => c.category === cat);
               if (catClusters.length === 0) return null;
+              const isCatExpanded = expandedCategories.has(cat);
               return (
                 <div key={cat} className={styles.categorySection}>
-                  <div className={`${styles.categoryHeader} ${styles[cat.replace("-", "")]}`}>
+                  <div
+                    className={`${styles.categoryHeader} ${styles[cat.replace("-", "")]}`}
+                    onClick={() => toggleCategory(cat)}
+                    style={{ cursor: "pointer", userSelect: "none" }}
+                  >
                     <span>{CATEGORY_LABELS[cat]}</span>
                     <span className={styles.categoryCount}>{catClusters.length}</span>
+                    <button
+                      type="button"
+                      className={styles.expandBtn}
+                      onClick={e => { e.stopPropagation(); toggleCategory(cat); }}
+                      aria-label={isCatExpanded ? "Collapse category" : "Expand category"}
+                      style={{ marginLeft: "auto" }}
+                    >
+                      {isCatExpanded ? "−" : "+"}
+                    </button>
                   </div>
-                  <div className={styles.clusterList}>
+                  {isCatExpanded && <div className={styles.clusterList}>
                     {catClusters.map(cluster => {
                       const lc = LEVEL_COLORS[cluster.level] ?? LEVEL_COLORS[4];
                       const isExpanded = expandedClusters.has(cluster.key);
@@ -312,7 +328,7 @@ export default function SecurityCenter({
                         </div>
                       );
                     })}
-                  </div>
+                  </div>}
                 </div>
               );
             })}

@@ -1,4 +1,4 @@
-import type { EventHealthReport } from "./eventLog";
+import type { EventHealthReport, EventHealthAnalysis } from "./eventLog";
 
 export type TrustLevel = "trusted" | "verified" | "background" | "unknown";
 export type Category = "system" | "user" | "background" | "unknown";
@@ -108,6 +108,7 @@ declare global {
       getProcessNetwork: (pid: number) => Promise<{ tcp: any[], udp: any[] }>;
       getProcessServices: (pid: number) => Promise<any[]>;
       importEventLog: () => Promise<{ ok: boolean; canceled?: boolean; error?: string; report?: EventHealthReport }>;
+      analyzeEventHealth: (report: EventHealthReport) => Promise<EventHealthAnalysis & { error?: string }>;
     };
   }
 }
