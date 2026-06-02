@@ -46,4 +46,5 @@ contextBridge.exposeInMainWorld("electron", {
   getProcessDlls: (pid: number) => ipcRenderer.invoke("get-process-dlls", pid),
   getProcessNetwork: (pid: number) => ipcRenderer.invoke("get-process-network", pid),
   getProcessServices: (pid: number) => ipcRenderer.invoke("get-process-services", pid),
+  importEventLog: () => ipcRenderer.invoke("import-event-log"),
 });

@@ -1,9 +1,10 @@
-import { app, BrowserWindow, Notification, ipcMain, Menu, Tray, nativeImage, WebContents } from "electron";
+import { app, BrowserWindow, Notification, ipcMain, Menu, Tray, nativeImage, WebContents, dialog } from "electron";
 import path from "path";
 import fs from "fs";
-import { spawn, exec, ChildProcess } from "child_process";
+import { spawn, exec, execFile, ChildProcess } from "child_process";
 import { getTrust, getCategory } from "../src/lib/trust";
 import { createProfileId, ensureProfilesData, findProfile, normalizeProfileRules } from "../src/lib/profiles";
+import { parseWevtutilXml, clusterEvents } from "../src/lib/eventLog";
 
 // --- PERSISTENT POWERSHELL SESSION ---
 // One long-lived process handles all queries; eliminates per-poll spawning.
@@ -70,6 +71,17 @@ const ps = new PersistentPS();
 function safeExec(command: string, options: any = {}): Promise<{ stdout: string }> {
   return new Promise((resolve, reject) => {
     exec(command, { timeout: 10000, encoding: "utf8", windowsHide: true, ...options },
+      (error, stdout) => {
+        if (error) reject(error);
+        else resolve({ stdout: String(stdout) });
+      }
+    );
+  });
+}
+
+function safeExecFile(file: string, args: string[], options: any = {}): Promise<{ stdout: string }> {
+  return new Promise((resolve, reject) => {
+    execFile(file, args, { timeout: 10000, encoding: "utf8", windowsHide: true, ...options },
       (error, stdout) => {
         if (error) reject(error);
         else resolve({ stdout: String(stdout) });
@@ -1351,5 +1363,42 @@ ipcMain.handle("get-stats", async () => {
     return JSON.parse(stdout);
   } catch (e) {
     return { cpu: 0, ram: 0 };
+  }
+});
+
+ipcMain.handle("import-event-log", async () => {
+  if (!mainWindow) return { ok: false, error: "No window available" };
+
+  const { canceled, filePaths } = await dialog.showOpenDialog(mainWindow, {
+    title: "Import Windows Event Log",
+    filters: [{ name: "Event Log Files", extensions: ["evtx"] }],
+    properties: ["openFile"],
+  });
+
+  if (canceled || filePaths.length === 0) return { ok: false, canceled: true };
+
+  const filePath = filePaths[0];
+  const fileName = path.basename(filePath);
+
+  try {
+    const { stdout } = await safeExecFile(
+      "wevtutil",
+      ["qe", filePath, "/lf:true", "/f:xml", "/c:2000"],
+      { timeout: 30000, maxBuffer: 50 * 1024 * 1024 }
+    );
+
+    const entries = parseWevtutilXml(stdout);
+    const report = clusterEvents(entries, fileName);
+
+    appendAudit("event-log", `Imported event log: ${fileName}`, {
+      totalEvents: report.totalEvents,
+      health: report.overallHealth,
+      clusters: report.clusters.length,
+    });
+
+    return { ok: true, report };
+  } catch (err) {
+    log("import-event-log error: " + String(err));
+    return { ok: false, error: String(err) };
   }
 });

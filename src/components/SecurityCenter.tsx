@@ -1,6 +1,7 @@
 "use client";
-import { useState, useMemo } from "react";
+import { useState, useMemo, useCallback } from "react";
 import type { ProcessInfo, ProcessProfile, RuleConfig } from "@/lib/types";
+import type { EventHealthReport, EventCluster } from "@/lib/eventLog";
 import styles from "./SecurityCenter.module.css";
 
 type AuditEvent = { id: string; ts: number; type: string; message: string; details?: unknown };
@@ -17,6 +18,34 @@ interface Props {
   onSaveProfile?: (name: string) => void;
 }
 
+const HEALTH_LABELS: Record<string, string> = {
+  good: "All Clear",
+  watch: "Watch",
+  attention: "Needs Attention",
+  urgent: "Urgent",
+};
+
+const HEALTH_COLORS: Record<string, string> = {
+  good: "#22c55e",
+  watch: "#f59e0b",
+  attention: "#f87171",
+  urgent: "#ef4444",
+};
+
+const CATEGORY_LABELS: Record<string, string> = {
+  "needs-attention": "Needs Attention",
+  "watch": "Watch",
+  "likely-noise": "Likely Noise",
+};
+
+const LEVEL_COLORS: Record<number, { bg: string; color: string }> = {
+  1: { bg: "rgba(239,68,68,0.15)", color: "#ef4444" },
+  2: { bg: "rgba(248,113,113,0.12)", color: "#f87171" },
+  3: { bg: "rgba(245,158,11,0.12)", color: "#f59e0b" },
+  4: { bg: "rgba(148,163,184,0.08)", color: "#94a3b8" },
+  0: { bg: "rgba(148,163,184,0.08)", color: "#94a3b8" },
+};
+
 const EVENT_COLORS: Record<string, { bg: string; color: string; label: string }> = {
   ban:         { bg: "rgba(248,113,113,0.12)", color: "#f87171", label: "BAN" },
   limited:     { bg: "rgba(245,158,11,0.12)",  color: "#f59e0b", label: "LIMITED" },
@@ -25,6 +54,7 @@ const EVENT_COLORS: Record<string, { bg: string; color: string; label: string }>
   kill:        { bg: "rgba(248,113,113,0.12)", color: "#f87171", label: "KILL" },
   unknown:     { bg: "rgba(245,158,11,0.12)",  color: "#f59e0b", label: "UNKNOWN" },
   scan:        { bg: "rgba(34,197,94,0.12)",   color: "#22c55e", label: "SCAN" },
+  "event-log": { bg: "rgba(96,165,250,0.12)",  color: "#60a5fa", label: "EVENT LOG" },
   "game-mode": { bg: "rgba(139,92,246,0.12)",  color: "#a78bfa", label: "GAME MODE" },
   safety:      { bg: "rgba(34,197,94,0.12)",   color: "#22c55e", label: "SAFETY" },
   priority:    { bg: "rgba(96,165,250,0.08)",  color: "#93c5fd", label: "PRIORITY" },
@@ -45,6 +75,36 @@ export default function SecurityCenter({
   const [searchQuery, setSearchQuery] = useState("");
   const [filterAction, setFilterAction] = useState<"ALL" | "ALLOW" | "LIMITED" | "BAN">("ALL");
   const [profileName, setProfileName] = useState("");
+  const [eventReport, setEventReport] = useState<EventHealthReport | null>(null);
+  const [eventImportError, setEventImportError] = useState("");
+  const [importingEvents, setImportingEvents] = useState(false);
+  const [expandedClusters, setExpandedClusters] = useState<Set<string>>(new Set());
+
+  const toggleCluster = useCallback((key: string) => {
+    setExpandedClusters(prev => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key); else next.add(key);
+      return next;
+    });
+  }, []);
+
+  const handleImportEventLog = useCallback(async () => {
+    if (!window.electron?.importEventLog) return;
+    setImportingEvents(true);
+    setEventImportError("");
+    try {
+      const result = await window.electron.importEventLog();
+      if (result.ok && result.report) {
+        setEventReport(result.report);
+      } else if (!result.canceled) {
+        setEventImportError(result.error || "Event log import failed.");
+      }
+    } catch (err) {
+      setEventImportError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setImportingEvents(false);
+    }
+  }, []);
 
   const totalRules = Object.keys(rules).filter(name => rules[name].action !== "NONE").length;
   const bannedCount = Object.values(rules).filter(r => r.action === "BAN").length;
@@ -287,6 +347,110 @@ export default function SecurityCenter({
             })
           )}
         </div>
+      </div>
+
+      {/* Windows Event Health */}
+      <div className={styles.eventHealthPane}>
+        <div className={styles.paneHeader}>
+          <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+            <span className={styles.paneTitle}>Windows Event Health</span>
+            {eventReport && (
+              <span
+                className={styles.healthBadge}
+                style={{ background: `${HEALTH_COLORS[eventReport.overallHealth]}22`, color: HEALTH_COLORS[eventReport.overallHealth], borderColor: `${HEALTH_COLORS[eventReport.overallHealth]}44` }}
+              >
+                {HEALTH_LABELS[eventReport.overallHealth]}
+              </span>
+            )}
+          </div>
+          <button
+            type="button"
+            className={styles.importBtn}
+            disabled={importingEvents}
+            onClick={handleImportEventLog}
+          >
+            {importingEvents ? "Importing..." : "Import .evtx"}
+          </button>
+        </div>
+        {eventImportError && <div className={styles.errorText}>{eventImportError}</div>}
+
+        {!eventReport ? (
+          <div className={styles.emptyText}>
+            Import a saved Windows Event Viewer .evtx file to analyze it for issues, errors, and patterns — no AI required.
+          </div>
+        ) : (
+          <div className={styles.eventReportBody}>
+            <div className={styles.eventMeta}>
+              {eventReport.totalEvents.toLocaleString()} events &middot; {eventReport.fileName}
+              {eventReport.dateRange && (
+                <> &middot; {new Date(eventReport.dateRange.from).toLocaleDateString()} &ndash; {new Date(eventReport.dateRange.to).toLocaleDateString()}</>
+              )}
+              &middot; {eventReport.clusters.length} unique finding{eventReport.clusters.length !== 1 ? "s" : ""}
+            </div>
+            <div className={styles.eventStats}>
+              <span>Critical <strong>{eventReport.criticalCount.toLocaleString()}</strong></span>
+              <span>Errors <strong>{eventReport.errorCount.toLocaleString()}</strong></span>
+              <span>Warnings <strong>{eventReport.warningCount.toLocaleString()}</strong></span>
+              <span>Needs attention <strong>{eventReport.clusters.filter(c => c.category === "needs-attention").length.toLocaleString()}</strong></span>
+              <span>Likely noise <strong>{eventReport.clusters.filter(c => c.category === "likely-noise").length.toLocaleString()}</strong></span>
+            </div>
+
+            {(["needs-attention", "watch", "likely-noise"] as const).map(cat => {
+              const catClusters: EventCluster[] = eventReport.clusters.filter(c => c.category === cat);
+              if (catClusters.length === 0) return null;
+              return (
+                <div key={cat} className={styles.categorySection}>
+                  <div className={`${styles.categoryHeader} ${styles[cat.replace("-", "")]}`}>
+                    <span>{CATEGORY_LABELS[cat]}</span>
+                    <span className={styles.categoryCount}>{catClusters.length}</span>
+                  </div>
+                  <div className={styles.clusterList}>
+                    {catClusters.map(cluster => {
+                      const lc = LEVEL_COLORS[cluster.level] ?? LEVEL_COLORS[4];
+                      const isExpanded = expandedClusters.has(cluster.key);
+                      return (
+                        <div key={cluster.key} className={styles.clusterRow}>
+                          <div className={styles.clusterMain}>
+                            <span className={styles.levelBadge} style={{ background: lc.bg, color: lc.color }}>
+                              {cluster.levelName}
+                            </span>
+                            <span className={styles.clusterProvider}>
+                              {cluster.provider.replace(/^Microsoft-Windows-/, "")}&nbsp;&middot;&nbsp;{cluster.eventId}
+                            </span>
+                            <span className={styles.clusterCount}>&times;{cluster.count}</span>
+                            <span className={styles.clusterSummary}>{cluster.summary}</span>
+                            <button
+                              type="button"
+                              className={styles.expandBtn}
+                              onClick={() => toggleCluster(cluster.key)}
+                              aria-label={isExpanded ? "Collapse" : "Expand"}
+                            >
+                              {isExpanded ? "▲" : "▼"}
+                            </button>
+                          </div>
+                          {isExpanded && (
+                            <div className={styles.clusterDetails}>
+                              <div><span className={styles.detailLabel}>Provider:</span> {cluster.provider}</div>
+                              {cluster.firstSeen && (
+                                <div><span className={styles.detailLabel}>First seen:</span> {new Date(cluster.firstSeen).toLocaleString()}</div>
+                              )}
+                              {cluster.lastSeen && cluster.lastSeen !== cluster.firstSeen && (
+                                <div><span className={styles.detailLabel}>Last seen:</span> {new Date(cluster.lastSeen).toLocaleString()}</div>
+                              )}
+                              {cluster.sampleMessage && (
+                                <div className={styles.clusterMessage}>{cluster.sampleMessage.slice(0, 300)}</div>
+                              )}
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
       </div>
     </div>
   );

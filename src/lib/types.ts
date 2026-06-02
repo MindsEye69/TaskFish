@@ -1,3 +1,5 @@
+import type { EventHealthReport } from "./eventLog";
+
 export type TrustLevel = "trusted" | "verified" | "background" | "unknown";
 export type Category = "system" | "user" | "background" | "unknown";
 export type RuleAction = "ALLOW" | "BAN" | "LIMITED" | "NONE";
@@ -105,6 +107,7 @@ declare global {
       getProcessDlls: (pid: number) => Promise<any[]>;
       getProcessNetwork: (pid: number) => Promise<{ tcp: any[], udp: any[] }>;
       getProcessServices: (pid: number) => Promise<any[]>;
+      importEventLog: () => Promise<{ ok: boolean; canceled?: boolean; error?: string; report?: EventHealthReport }>;
     };
   }
 }
