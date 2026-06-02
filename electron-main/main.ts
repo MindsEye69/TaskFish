@@ -1584,12 +1584,12 @@ function validateEventHealthAnalysis(raw: unknown, report: EventHealthReport): E
   return { overallHealth, summary: r.summary.slice(0, 800), findings, analyzedAt: Date.now(), model: null, offline: false };
 }
 
-ipcMain.handle("analyze-event-health", async (_event, report: EventHealthReport) => {
+ipcMain.handle("analyze-event-health", async (_event, report: EventHealthReport, forceRefresh?: boolean) => {
   if (!report || !Array.isArray(report.clusters)) return { error: "Invalid report" };
 
   const cacheKey = buildEventHealthCacheKey(report);
   const cache = loadJson(eventHealthCachePath) as Record<string, EventHealthAnalysis>;
-  if (cache[cacheKey]) return cache[cacheKey];
+  if (!forceRefresh && cache[cacheKey]) return cache[cacheKey];
 
   const model = await getBestModel();
   if (model) {

@@ -108,7 +108,7 @@ declare global {
       getProcessNetwork: (pid: number) => Promise<{ tcp: any[], udp: any[] }>;
       getProcessServices: (pid: number) => Promise<any[]>;
       importEventLog: () => Promise<{ ok: boolean; canceled?: boolean; error?: string; report?: EventHealthReport }>;
-      analyzeEventHealth: (report: EventHealthReport) => Promise<EventHealthAnalysis & { error?: string }>;
+      analyzeEventHealth: (report: EventHealthReport, forceRefresh?: boolean) => Promise<EventHealthAnalysis & { error?: string }>;
     };
   }
 }

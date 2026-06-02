@@ -1,7 +1,7 @@
 "use client";
 import { useState, useMemo, useCallback } from "react";
 import type { AiSetupPhase, ProcessInfo, ProcessProfile, RuleConfig } from "@/lib/types";
-import type { EventHealthReport, EventCluster, EventHealthAnalysis } from "@/lib/eventLog";
+import type { EventHealthReport, EventCluster, EventHealthAnalysis, EventHealthFinding } from "@/lib/eventLog";
 import styles from "./SecurityCenter.module.css";
 
 type AuditEvent = { id: string; ts: number; type: string; message: string; details?: unknown };
@@ -136,12 +136,23 @@ export default function SecurityCenter({
     if (!eventReport || analyzingEvents || !window.electron?.analyzeEventHealth) return;
     setAnalyzingEvents(true);
     try {
-      const data = await window.electron.analyzeEventHealth(eventReport);
+      const forceRefresh = Boolean(eventAnalysis);
+      const data = await window.electron.analyzeEventHealth(eventReport, forceRefresh);
       if (!data.error) setEventAnalysis(data);
     } catch { /* ignore */ } finally {
       setAnalyzingEvents(false);
     }
-  }, [eventReport, analyzingEvents]);
+  }, [eventReport, analyzingEvents, eventAnalysis]);
+
+  const handleSearchEventFix = useCallback(async (finding: EventHealthFinding) => {
+    const searchQuery = `${finding.clusterId} Windows fix ${finding.explanation}`.slice(0, 100);
+    if (window.electron?.notify) {
+      window.electron.notify("Finding solutions", `Searching for detailed fix instructions for ${finding.clusterId}...`);
+    }
+    // TODO: Implement web search for finding solutions
+    // This will search online and generate detailed fix instructions
+    // For now, just show the safe next steps that are already provided
+  }, []);
 
   const totalRules = Object.keys(rules).filter(name => rules[name].action !== "NONE").length;
   const bannedCount = Object.values(rules).filter(r => r.action === "BAN").length;
@@ -397,6 +408,16 @@ export default function SecurityCenter({
                                   When to ignore: {finding.whenToIgnore}
                                 </div>
                               )}
+                              <div className={styles.findingActions}>
+                                <button
+                                  type="button"
+                                  className={styles.helpFixBtn}
+                                  onClick={() => handleSearchEventFix(finding)}
+                                  title="Search online for detailed fix instructions"
+                                >
+                                  Help me fix this
+                                </button>
+                              </div>
                             </div>
                           )}
                         </div>
