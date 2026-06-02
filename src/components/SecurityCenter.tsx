@@ -188,6 +188,196 @@ export default function SecurityCenter({
         </div>
       </div>
 
+      {/* Windows Event Health */}
+      <div className={styles.eventHealthPane}>
+        <div className={styles.paneHeader}>
+          <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+            <span className={styles.paneTitle}>Windows Event Health</span>
+            {eventReport && (
+              <span
+                className={styles.healthBadge}
+                style={{ background: `${HEALTH_COLORS[eventReport.overallHealth]}22`, color: HEALTH_COLORS[eventReport.overallHealth], borderColor: `${HEALTH_COLORS[eventReport.overallHealth]}44` }}
+              >
+                {HEALTH_LABELS[eventReport.overallHealth]}
+              </span>
+            )}
+          </div>
+          <div style={{ display: "flex", gap: "8px" }}>
+            {eventReport && (
+              <button
+                type="button"
+                className={styles.analyzeBtn}
+                disabled={analyzingEvents}
+                onClick={handleAnalyzeEvents}
+              >
+                {analyzingEvents ? "Analyzing..." : eventAnalysis ? "Re-analyze" : "Analyze"}
+              </button>
+            )}
+            <button
+              type="button"
+              className={styles.importBtn}
+              disabled={importingEvents}
+              onClick={handleImportEventLog}
+            >
+              {importingEvents ? "Importing..." : "Import .evtx"}
+            </button>
+          </div>
+        </div>
+        {eventImportError && <div className={styles.errorText}>{eventImportError}</div>}
+
+        {!eventReport ? (
+          <div className={styles.emptyText}>
+            Import a saved Windows Event Viewer .evtx file to analyze it for issues, errors, and patterns. No AI required.
+          </div>
+        ) : (
+          <div className={styles.eventReportBody}>
+            <div className={styles.eventMeta}>
+              {eventReport.totalEvents.toLocaleString()} events - {eventReport.fileName}
+              {eventReport.dateRange && (
+                <> - {new Date(eventReport.dateRange.from).toLocaleDateString()} to {new Date(eventReport.dateRange.to).toLocaleDateString()}</>
+              )}
+              - {eventReport.clusters.length} unique finding{eventReport.clusters.length !== 1 ? "s" : ""}
+            </div>
+            <div className={styles.eventStats}>
+              <span>Critical <strong>{eventReport.criticalCount.toLocaleString()}</strong></span>
+              <span>Errors <strong>{eventReport.errorCount.toLocaleString()}</strong></span>
+              <span>Warnings <strong>{eventReport.warningCount.toLocaleString()}</strong></span>
+              <span>Needs attention <strong>{eventReport.clusters.filter(c => c.category === "needs-attention").length.toLocaleString()}</strong></span>
+              <span>Likely noise <strong>{eventReport.clusters.filter(c => c.category === "likely-noise").length.toLocaleString()}</strong></span>
+            </div>
+
+            {(["needs-attention", "watch", "likely-noise"] as const).map(cat => {
+              const catClusters: EventCluster[] = eventReport.clusters.filter(c => c.category === cat);
+              if (catClusters.length === 0) return null;
+              return (
+                <div key={cat} className={styles.categorySection}>
+                  <div className={`${styles.categoryHeader} ${styles[cat.replace("-", "")]}`}>
+                    <span>{CATEGORY_LABELS[cat]}</span>
+                    <span className={styles.categoryCount}>{catClusters.length}</span>
+                  </div>
+                  <div className={styles.clusterList}>
+                    {catClusters.map(cluster => {
+                      const lc = LEVEL_COLORS[cluster.level] ?? LEVEL_COLORS[4];
+                      const isExpanded = expandedClusters.has(cluster.key);
+                      return (
+                        <div key={cluster.key} className={styles.clusterRow}>
+                          <div className={styles.clusterMain}>
+                            <span className={styles.levelBadge} style={{ background: lc.bg, color: lc.color }}>
+                              {cluster.levelName}
+                            </span>
+                            <span className={styles.clusterProvider}>
+                              {cluster.provider.replace(/^Microsoft-Windows-/, "")} - {cluster.eventId}
+                            </span>
+                            <span className={styles.clusterCount}>&times;{cluster.count}</span>
+                            <span className={styles.clusterSummary}>{cluster.summary}</span>
+                            <button
+                              type="button"
+                              className={styles.expandBtn}
+                              onClick={() => toggleCluster(cluster.key)}
+                              aria-label={isExpanded ? "Collapse" : "Expand"}
+                            >
+                              {isExpanded ? "-" : "+"}
+                            </button>
+                          </div>
+                          {isExpanded && (
+                            <div className={styles.clusterDetails}>
+                              <div><span className={styles.detailLabel}>Provider:</span> {cluster.provider}</div>
+                              {cluster.firstSeen && (
+                                <div><span className={styles.detailLabel}>First seen:</span> {new Date(cluster.firstSeen).toLocaleString()}</div>
+                              )}
+                              {cluster.lastSeen && cluster.lastSeen !== cluster.firstSeen && (
+                                <div><span className={styles.detailLabel}>Last seen:</span> {new Date(cluster.lastSeen).toLocaleString()}</div>
+                              )}
+                              {cluster.sampleMessage && (
+                                <div className={styles.clusterMessage}>{cluster.sampleMessage.slice(0, 300)}</div>
+                              )}
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              );
+            })}
+
+            {eventAnalysis && (
+              <div className={styles.findingsSection}>
+                <div className={styles.findingsHeader}>
+                  <span style={{ fontSize: "14px", fontWeight: 700, color: "var(--text)" }}>Health Findings</span>
+                  <span className={styles.modelBadge}>
+                    {eventAnalysis.offline
+                      ? "Deterministic"
+                      : `AI - ${eventAnalysis.model ?? "unknown"}`}
+                  </span>
+                </div>
+                <p className={styles.findingSummary}>{eventAnalysis.summary}</p>
+                {eventAnalysis.findings.length === 0 ? (
+                  <div className={styles.emptyText}>No actionable findings identified.</div>
+                ) : (
+                  <div className={styles.findingList}>
+                    {eventAnalysis.findings.map(finding => {
+                      const isExpanded = expandedFindings.has(finding.clusterId);
+                      const sevClass =
+                        finding.severity === "critical" ? styles.severityCritical :
+                        finding.severity === "warning" ? styles.severityWarning :
+                        styles.severityInfo;
+                      return (
+                        <div key={finding.clusterId} className={styles.findingCard}>
+                          <div
+                            className={styles.findingMain}
+                            onClick={() => toggleFinding(finding.clusterId)}
+                            style={{ cursor: "pointer" }}
+                          >
+                            <span className={sevClass}>{finding.severity}</span>
+                            <span className={styles.confText}>{finding.confidence} conf</span>
+                            <span className={styles.findingId}>{finding.clusterId}</span>
+                            <span className={styles.findingExplanation}>{finding.explanation}</span>
+                            <button
+                              type="button"
+                              className={styles.expandBtn}
+                              onClick={e => { e.stopPropagation(); toggleFinding(finding.clusterId); }}
+                              aria-label={isExpanded ? "Collapse" : "Expand"}
+                            >
+                              {isExpanded ? "-" : "+"}
+                            </button>
+                          </div>
+                          {isExpanded && (
+                            <div className={styles.findingDetail}>
+                              {finding.evidence.length > 0 && (
+                                <div className={styles.findingDetailSection}>
+                                  <div className={styles.findingDetailTitle}>Evidence</div>
+                                  <ul className={styles.findingDetailList}>
+                                    {finding.evidence.map((e, i) => <li key={i}>{e}</li>)}
+                                  </ul>
+                                </div>
+                              )}
+                              {finding.safeNextSteps.length > 0 && (
+                                <div className={styles.findingDetailSection}>
+                                  <div className={styles.findingDetailTitle}>Safe Next Steps</div>
+                                  <ul className={styles.findingDetailList}>
+                                    {finding.safeNextSteps.map((s, i) => <li key={i}>{s}</li>)}
+                                  </ul>
+                                </div>
+                              )}
+                              {finding.whenToIgnore && (
+                                <div className={styles.findingIgnore}>
+                                  When to ignore: {finding.whenToIgnore}
+                                </div>
+                              )}
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+
       <div className={styles.metricsGrid}>
         <div className={styles.metricCard}>
           <span className={styles.metricVal}>{totalRules}</span>
@@ -380,195 +570,6 @@ export default function SecurityCenter({
         </div>
       </div>
 
-      {/* Windows Event Health */}
-      <div className={styles.eventHealthPane}>
-        <div className={styles.paneHeader}>
-          <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-            <span className={styles.paneTitle}>Windows Event Health</span>
-            {eventReport && (
-              <span
-                className={styles.healthBadge}
-                style={{ background: `${HEALTH_COLORS[eventReport.overallHealth]}22`, color: HEALTH_COLORS[eventReport.overallHealth], borderColor: `${HEALTH_COLORS[eventReport.overallHealth]}44` }}
-              >
-                {HEALTH_LABELS[eventReport.overallHealth]}
-              </span>
-            )}
-          </div>
-          <div style={{ display: "flex", gap: "8px" }}>
-            {eventReport && (
-              <button
-                type="button"
-                className={styles.analyzeBtn}
-                disabled={analyzingEvents}
-                onClick={handleAnalyzeEvents}
-              >
-                {analyzingEvents ? "Analyzing..." : eventAnalysis ? "Re-analyze" : "Analyze"}
-              </button>
-            )}
-            <button
-              type="button"
-              className={styles.importBtn}
-              disabled={importingEvents}
-              onClick={handleImportEventLog}
-            >
-              {importingEvents ? "Importing..." : "Import .evtx"}
-            </button>
-          </div>
-        </div>
-        {eventImportError && <div className={styles.errorText}>{eventImportError}</div>}
-
-        {!eventReport ? (
-          <div className={styles.emptyText}>
-            Import a saved Windows Event Viewer .evtx file to analyze it for issues, errors, and patterns. No AI required.
-          </div>
-        ) : (
-          <div className={styles.eventReportBody}>
-            <div className={styles.eventMeta}>
-              {eventReport.totalEvents.toLocaleString()} events - {eventReport.fileName}
-              {eventReport.dateRange && (
-                <> - {new Date(eventReport.dateRange.from).toLocaleDateString()} to {new Date(eventReport.dateRange.to).toLocaleDateString()}</>
-              )}
-              - {eventReport.clusters.length} unique finding{eventReport.clusters.length !== 1 ? "s" : ""}
-            </div>
-            <div className={styles.eventStats}>
-              <span>Critical <strong>{eventReport.criticalCount.toLocaleString()}</strong></span>
-              <span>Errors <strong>{eventReport.errorCount.toLocaleString()}</strong></span>
-              <span>Warnings <strong>{eventReport.warningCount.toLocaleString()}</strong></span>
-              <span>Needs attention <strong>{eventReport.clusters.filter(c => c.category === "needs-attention").length.toLocaleString()}</strong></span>
-              <span>Likely noise <strong>{eventReport.clusters.filter(c => c.category === "likely-noise").length.toLocaleString()}</strong></span>
-            </div>
-
-            {(["needs-attention", "watch", "likely-noise"] as const).map(cat => {
-              const catClusters: EventCluster[] = eventReport.clusters.filter(c => c.category === cat);
-              if (catClusters.length === 0) return null;
-              return (
-                <div key={cat} className={styles.categorySection}>
-                  <div className={`${styles.categoryHeader} ${styles[cat.replace("-", "")]}`}>
-                    <span>{CATEGORY_LABELS[cat]}</span>
-                    <span className={styles.categoryCount}>{catClusters.length}</span>
-                  </div>
-                  <div className={styles.clusterList}>
-                    {catClusters.map(cluster => {
-                      const lc = LEVEL_COLORS[cluster.level] ?? LEVEL_COLORS[4];
-                      const isExpanded = expandedClusters.has(cluster.key);
-                      return (
-                        <div key={cluster.key} className={styles.clusterRow}>
-                          <div className={styles.clusterMain}>
-                            <span className={styles.levelBadge} style={{ background: lc.bg, color: lc.color }}>
-                              {cluster.levelName}
-                            </span>
-                            <span className={styles.clusterProvider}>
-                              {cluster.provider.replace(/^Microsoft-Windows-/, "")} - {cluster.eventId}
-                            </span>
-                            <span className={styles.clusterCount}>&times;{cluster.count}</span>
-                            <span className={styles.clusterSummary}>{cluster.summary}</span>
-                            <button
-                              type="button"
-                              className={styles.expandBtn}
-                              onClick={() => toggleCluster(cluster.key)}
-                              aria-label={isExpanded ? "Collapse" : "Expand"}
-                            >
-                              {isExpanded ? "-" : "+"}
-                            </button>
-                          </div>
-                          {isExpanded && (
-                            <div className={styles.clusterDetails}>
-                              <div><span className={styles.detailLabel}>Provider:</span> {cluster.provider}</div>
-                              {cluster.firstSeen && (
-                                <div><span className={styles.detailLabel}>First seen:</span> {new Date(cluster.firstSeen).toLocaleString()}</div>
-                              )}
-                              {cluster.lastSeen && cluster.lastSeen !== cluster.firstSeen && (
-                                <div><span className={styles.detailLabel}>Last seen:</span> {new Date(cluster.lastSeen).toLocaleString()}</div>
-                              )}
-                              {cluster.sampleMessage && (
-                                <div className={styles.clusterMessage}>{cluster.sampleMessage.slice(0, 300)}</div>
-                              )}
-                            </div>
-                          )}
-                        </div>
-                      );
-                    })}
-                  </div>
-                </div>
-              );
-            })}
-
-            {eventAnalysis && (
-              <div className={styles.findingsSection}>
-                <div className={styles.findingsHeader}>
-                  <span style={{ fontSize: "14px", fontWeight: 700, color: "var(--text)" }}>Health Findings</span>
-                  <span className={styles.modelBadge}>
-                    {eventAnalysis.offline
-                      ? "Deterministic"
-                      : `AI - ${eventAnalysis.model ?? "unknown"}`}
-                  </span>
-                </div>
-                <p className={styles.findingSummary}>{eventAnalysis.summary}</p>
-                {eventAnalysis.findings.length === 0 ? (
-                  <div className={styles.emptyText}>No actionable findings identified.</div>
-                ) : (
-                  <div className={styles.findingList}>
-                    {eventAnalysis.findings.map(finding => {
-                      const isExpanded = expandedFindings.has(finding.clusterId);
-                      const sevClass =
-                        finding.severity === "critical" ? styles.severityCritical :
-                        finding.severity === "warning" ? styles.severityWarning :
-                        styles.severityInfo;
-                      return (
-                        <div key={finding.clusterId} className={styles.findingCard}>
-                          <div
-                            className={styles.findingMain}
-                            onClick={() => toggleFinding(finding.clusterId)}
-                            style={{ cursor: "pointer" }}
-                          >
-                            <span className={sevClass}>{finding.severity}</span>
-                            <span className={styles.confText}>{finding.confidence} conf</span>
-                            <span className={styles.findingId}>{finding.clusterId}</span>
-                            <span className={styles.findingExplanation}>{finding.explanation}</span>
-                            <button
-                              type="button"
-                              className={styles.expandBtn}
-                              onClick={e => { e.stopPropagation(); toggleFinding(finding.clusterId); }}
-                              aria-label={isExpanded ? "Collapse" : "Expand"}
-                            >
-                              {isExpanded ? "-" : "+"}
-                            </button>
-                          </div>
-                          {isExpanded && (
-                            <div className={styles.findingDetail}>
-                              {finding.evidence.length > 0 && (
-                                <div className={styles.findingDetailSection}>
-                                  <div className={styles.findingDetailTitle}>Evidence</div>
-                                  <ul className={styles.findingDetailList}>
-                                    {finding.evidence.map((e, i) => <li key={i}>{e}</li>)}
-                                  </ul>
-                                </div>
-                              )}
-                              {finding.safeNextSteps.length > 0 && (
-                                <div className={styles.findingDetailSection}>
-                                  <div className={styles.findingDetailTitle}>Safe Next Steps</div>
-                                  <ul className={styles.findingDetailList}>
-                                    {finding.safeNextSteps.map((s, i) => <li key={i}>{s}</li>)}
-                                  </ul>
-                                </div>
-                              )}
-                              {finding.whenToIgnore && (
-                                <div className={styles.findingIgnore}>
-                                  When to ignore: {finding.whenToIgnore}
-                                </div>
-                              )}
-                            </div>
-                          )}
-                        </div>
-                      );
-                    })}
-                  </div>
-                )}
-              </div>
-            )}
-          </div>
-        )}
-      </div>
     </div>
   );
 }

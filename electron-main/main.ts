@@ -509,7 +509,8 @@ async function startOllama(): Promise<boolean> {
   ollamaProcess = exec(`"${binPath}" serve`, { windowsHide: true });
   ollamaProcess.on("exit", () => {
     ollamaProcess = null;
-    if (currentAiStatus.phase !== "pulling") {
+    // Don't broadcast idle during "starting" or "pulling" — ensureDefaultModel owns those transitions.
+    if (currentAiStatus.phase !== "pulling" && currentAiStatus.phase !== "starting") {
       broadcastAiStatus({ phase: "idle" });
     }
   });
