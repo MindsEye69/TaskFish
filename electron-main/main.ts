@@ -1656,8 +1656,9 @@ const EVENT_FIX_PROMPT = (
   sampleMessage: string,
   explanation: string,
   evidence: string[],
-): string =>
-  `You are a Windows system repair expert. A user's PC has this specific Windows Event Log problem and needs step-by-step fix instructions.
+): string => {
+  const isDcom = /distributedcom/i.test(provider) && (eventId === 10010 || eventId === 10016);
+  return `You are a Windows system repair expert. A user's PC has this Windows Event Log finding and needs safe, conservative fix guidance.
 
 Event details:
 - Cluster ID: ${clusterId}
@@ -1671,7 +1672,9 @@ Event details:
 - AI explanation: ${explanation}
 - Evidence: ${evidence.join("; ")}
 ${sampleMessage ? `- Sample message: ${sampleMessage.slice(0, 300)}` : ""}
-
+${isDcom ? `
+IMPORTANT — DistributedCOM Event ${eventId}: This is one of the most common Windows events across all versions and is almost always harmless background noise. Windows components silently request elevated COM permissions they do not actually need; the denial has no real effect. Your response MUST: (1) state in the title that this is usually noise, (2) advise checking for a real user-visible symptom before any action, (3) suggest Windows Update and a reboot as first steps, (4) never recommend DCOMCNFG, Component Services, or registry permission changes.
+` : ""}
 Respond with ONLY strict JSON matching this schema (no markdown, no extra text):
 {
   "title": "Short fix title (what we are fixing)",
@@ -1680,36 +1683,145 @@ Respond with ONLY strict JSON matching this schema (no markdown, no extra text):
     {
       "label": "Step name (5 words max)",
       "instruction": "Plain English instruction for this step",
-      "command": "optional PowerShell or CMD command the user can run directly (omit if not applicable)",
-      "warning": "optional safety note if this step has risk (omit if safe)"
+      "command": "optional PowerShell or CMD command the user can run (omit if not applicable — only include commands that exist in Windows)",
+      "warning": "REQUIRED for any step that modifies the system — include whenever the step touches the registry, stops/starts a service, changes firewall rules, or makes any system configuration change. Omit ONLY for pure read-only/information-gathering steps."
     }
   ],
   "escalation": "One sentence on when to call a professional or escalate beyond self-repair"
 }
 
-Rules:
-- Steps must be concrete, numbered actions specific to this event, not generic advice
-- Include PowerShell commands where they make the step easier and safer (e.g., checking disk health, viewing specific logs, restarting services)
-- Commands must be real, working Windows commands — no placeholders
-- Maximum 7 steps; focus on the most impactful actions
-- If the event is usually benign (e.g. DistributedCOM 10016), say so in title and keep steps minimal
-- Do NOT suggest reinstalling Windows unless all else has failed`;
+SAFETY RULES — follow exactly, no exceptions:
+1. Order steps: non-destructive information-gathering first (check for updates, verify with read-only commands, check app state), system-modifying steps last.
+2. SAFE commands (no warning needed): Get-WinEvent, wevtutil ql, chkdsk /scan, sfc /scannow, DISM /Online /Cleanup-Image /CheckHealth, DISM /Online /Cleanup-Image /ScanHealth, Get-Service (read-only), Test-Path, winver, eventvwr.
+3. RISKY commands (warning field REQUIRED): sc stop/start, net stop/start, Stop-Service/Start-Service/Restart-Service, reg add/delete, Set-ItemProperty or Remove-ItemProperty on registry keys, chkdsk /f or /r, netsh advfirewall, Set-NetFirewallRule, New-NetFirewallRule.
+4. FORBIDDEN — do not include under any circumstances: dcomcnfg, Component Services permission changes, DCOM AppID ACL edits, net localgroup, diskpart, format, invented cmdlets not shipped with Windows (e.g. Get-DCOMPermission, Set-DCOMPermission, Repair-ComRegistration, Set-DCOMConfig).
+5. Registry edits MUST carry warning: "Back up the registry first: regedit → File → Export. Incorrect edits can make Windows unbootable."
+6. Service stop/start MUST carry warning: "Stopping this service may affect running applications. Reboot if unexpected behavior occurs."
+7. DCOMCNFG or Component Services steps are FORBIDDEN — never suggest them.
+8. Maximum 5 steps. If the event is likely noise, limit to 2-3 conservative steps and say so in the title.
+9. Never suggest reinstalling Windows or destructive disk operations without an explicit warning marking them as absolute last resort.`;
+};
+
+const INVALID_CMDLET_RE = /\b(Get-DCOMPermission|Set-DCOMPermission|Get-COMRegistration|Set-ComObjectSecurity|Repair-ComRegistration|Set-DCOMConfig|Get-DCOMConfig|dcomedit|comregedit|Set-DCOMAccessPermission)\b/i;
+const FORBIDDEN_FIX_RE = /\b(dcomcnfg|component services|dcom\s+(appid|app id|acl|permission|permissions)|net\s+localgroup|diskpart|format)\b/i;
+const REGISTRY_FIX_RE = /\b(registry|regedit|HKLM|HKCU|HKEY_LOCAL_MACHINE|HKEY_CURRENT_USER|reg\s+(add|delete)|Set-ItemProperty|Remove-ItemProperty)\b/i;
+const FIREWALL_FIX_RE = /\b(firewall|netsh\s+advfirewall|Set-NetFirewallRule|New-NetFirewallRule)\b/i;
+const DESTRUCTIVE_FIX_RE = /\b(chkdsk\s+.*\/[fr]|delete|remove|reset|reinstall Windows)\b/i;
+
+function isRiskyCmd(cmd: string): string {
+  if (/\breg\s+(add|delete)\b/i.test(cmd) || /\b(Set|New|Remove)-ItemProperty\b/i.test(cmd)) {
+    return "Back up the registry first: regedit > File > Export. Incorrect edits can make Windows unbootable.";
+  }
+  if (/\bsc\s+(stop|start)\b/i.test(cmd) || /\bnet\s+(stop|start)\b/i.test(cmd) || /\b(Stop|Start|Restart)-Service\b/i.test(cmd)) {
+    return "Stopping or restarting this service may affect running applications. Reboot if unexpected behavior occurs.";
+  }
+  if (/\bdcomcnfg\b/i.test(cmd)) {
+    return "DCOMCNFG changes can break COM-dependent applications and are rarely needed. This step has been flagged for review.";
+  }
+  if (/\bnetsh\s+advfirewall\b/i.test(cmd) || /\b(Set|New)-NetFirewallRule\b/i.test(cmd)) {
+    return "Firewall changes affect network security. Document the change and verify behavior thoroughly.";
+  }
+  if (/\bchkdsk\b.*\/[fr]\b/i.test(cmd)) {
+    return "chkdsk /f or /r requires a reboot and may take considerable time. Save all work before proceeding.";
+  }
+  return "";
+}
+
+function warningForStep(step: EventFixStep): string {
+  const text = `${step.instruction} ${step.command || ""}`;
+  if (REGISTRY_FIX_RE.test(text)) {
+    return "Back up the registry first: regedit > File > Export. Incorrect edits can make Windows unbootable.";
+  }
+  if (/\b(sc\s+(stop|start)|net\s+(stop|start)|Stop-Service|Start-Service|Restart-Service)\b/i.test(text)) {
+    return "Stopping or restarting this service may affect running applications. Reboot if unexpected behavior occurs.";
+  }
+  if (FIREWALL_FIX_RE.test(text)) {
+    return "Firewall changes affect network security. Document the change and verify behavior thoroughly.";
+  }
+  if (DESTRUCTIVE_FIX_RE.test(text)) {
+    return "This can change or remove system state. Back up important data and use only as a last resort.";
+  }
+  return "";
+}
+
+function removedUnsafeStep(isDcom: boolean): EventFixStep {
+  return {
+    label: "Unsafe step removed",
+    instruction: isDcom
+      ? "A DCOMCNFG, Component Services, registry permission, or unsupported command suggestion was removed. DistributedCOM 10010/10016 findings should not be repaired with DCOM permission edits unless a documented Microsoft support procedure matches a real symptom."
+      : "An unsupported or unsafe repair suggestion was removed. Use documented vendor or Microsoft guidance before attempting registry, permission, local group, disk partition, or formatting changes.",
+    warning: "Do not run the removed advice without a verified backup, administrator approval, and trusted vendor documentation.",
+  };
+}
+
+function sanitizeFixResult(result: EventFixResult, provider: string, eventId: number): EventFixResult {
+  const isDcom = /distributedcom/i.test(provider) && (eventId === 10010 || eventId === 10016);
+  let removedUnsafe = false;
+
+  let steps: EventFixStep[] = result.steps.flatMap(step => {
+    const text = `${step.label} ${step.instruction} ${step.command || ""}`;
+    if (FORBIDDEN_FIX_RE.test(text) || INVALID_CMDLET_RE.test(text)) {
+      removedUnsafe = true;
+      return [];
+    }
+    if (!step.command) {
+      const autoWarning = warningForStep(step);
+      return [{ ...step, warning: step.warning || autoWarning || undefined }];
+    }
+    const autoWarning = isRiskyCmd(step.command) || warningForStep(step);
+    return [{ ...step, warning: step.warning || autoWarning || undefined }];
+  });
+
+  if (removedUnsafe) steps.push(removedUnsafeStep(isDcom));
+
+  if (isDcom && !steps[0]?.instruction.toLowerCase().includes("noise") && !steps[0]?.instruction.toLowerCase().includes("ignore")) {
+    steps = [{
+      label: "Is this noise?",
+      instruction: `DistributedCOM event ${eventId} is extremely common on all Windows versions and is almost always harmless. Windows components silently request elevated COM permissions they do not need; the denial has no effect on normal operation. Before taking any action, confirm whether you are experiencing a real symptom (e.g., a specific app failing, a service not starting). If there is no visible problem, no action is required.`,
+    }, ...steps];
+  }
+
+  if (isDcom) {
+    const hasConservativeCheck = steps.some(step => /\b(update|reboot|repair)\b/i.test(step.instruction));
+    if (!hasConservativeCheck) {
+      steps.splice(1, 0, {
+        label: "Update and reboot",
+        instruction: "If the event correlates with a real app or Windows feature problem, install Windows updates, reboot, and update or repair the affected app before considering deeper remediation.",
+      });
+    }
+    steps = steps.slice(0, 3);
+  }
+
+  const title = isDcom && !/\b(noise|harmless|ignore)\b/i.test(result.title)
+    ? `Usually noise: ${result.title}`.slice(0, 120)
+    : result.title;
+
+  return { ...result, title, steps };
+}
 
 ipcMain.handle("get-event-fix", async (_event, finding: EventHealthFinding, cluster: EventCluster) => {
   if (!finding || !cluster) return { error: "Invalid input", title: "", rootCauses: [], steps: [], escalation: "" };
 
   const cacheKey = `fix:${finding.clusterId}`;
   const cache = loadJson(eventFixCachePath) as Record<string, EventFixResult>;
-  if (cache[cacheKey]) return cache[cacheKey];
+  if (cache[cacheKey]) {
+    const result = sanitizeFixResult(cache[cacheKey], cluster.provider, cluster.eventId);
+    if (JSON.stringify(result) !== JSON.stringify(cache[cacheKey])) {
+      cache[cacheKey] = result;
+      saveJson(eventFixCachePath, cache);
+    }
+    return result;
+  }
 
   const model = await getBestModel();
   if (!model) {
-    const result: EventFixResult = {
+    const rawResult: EventFixResult = {
       title: `Fix: ${finding.clusterId}`,
       rootCauses: ["AI model not available — showing basic guidance"],
       steps: finding.safeNextSteps.map((s, i) => ({ label: `Step ${i + 1}`, instruction: s })),
       escalation: "Contact a professional if the issue persists after following these steps.",
     };
+    const result = sanitizeFixResult(rawResult, cluster.provider, cluster.eventId);
     cache[cacheKey] = result;
     saveJson(eventFixCachePath, cache);
     return result;
@@ -1746,10 +1858,10 @@ ipcMain.handle("get-event-fix", async (_event, finding: EventHealthFinding, clus
               if (!s || typeof s !== "object") return false;
               const obj = s as Record<string, unknown>;
               return typeof obj.label === "string" && typeof obj.instruction === "string";
-            }).slice(0, 7)
+            }).slice(0, 5)
           : finding.safeNextSteps.map((s, i) => ({ label: `Step ${i + 1}`, instruction: s }));
 
-        const result: EventFixResult = {
+        const rawResult: EventFixResult = {
           title: typeof r.title === "string" ? r.title.slice(0, 120) : `Fix: ${finding.clusterId}`,
           rootCauses: Array.isArray(r.rootCauses)
             ? (r.rootCauses as unknown[]).filter((c): c is string => typeof c === "string").slice(0, 4)
@@ -1757,6 +1869,7 @@ ipcMain.handle("get-event-fix", async (_event, finding: EventHealthFinding, clus
           steps,
           escalation: typeof r.escalation === "string" ? r.escalation.slice(0, 400) : "",
         };
+        const result = sanitizeFixResult(rawResult, cluster.provider, cluster.eventId);
         cache[cacheKey] = result;
         saveJson(eventFixCachePath, cache);
         return result;
@@ -1768,12 +1881,13 @@ ipcMain.handle("get-event-fix", async (_event, finding: EventHealthFinding, clus
   }
 
   // Fallback to safeNextSteps
-  const result: EventFixResult = {
+  const rawResult: EventFixResult = {
     title: `Fix: ${finding.clusterId}`,
     rootCauses: [],
     steps: finding.safeNextSteps.map((s, i) => ({ label: `Step ${i + 1}`, instruction: s })),
     escalation: "Contact a professional if the issue persists.",
   };
+  const result = sanitizeFixResult(rawResult, cluster.provider, cluster.eventId);
   cache[cacheKey] = result;
   saveJson(eventFixCachePath, cache);
   return result;

@@ -1204,6 +1204,16 @@
   background: rgba(96, 165, 250, 0.22);
 }
 
+.fixStepRisky {
+  background: rgba(245, 158, 11, 0.05);
+  border-radius: 4px;
+}
+
+.fixStepRisky::before {
+  background: rgba(245, 158, 11, 0.2);
+  color: #f59e0b;
+}
+
 .fixStepWarning {
   font-size: 11px;
   color: #f59e0b;

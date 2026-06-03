@@ -460,7 +460,7 @@ export default function SecurityCenter({
                                     <div className={styles.fixSectionLabel}>Fix steps</div>
                                     <ol className={styles.fixStepList}>
                                       {fix.steps.map((step: EventFixStep, i: number) => (
-                                        <li key={i} className={styles.fixStep}>
+                                        <li key={i} className={`${styles.fixStep}${step.warning ? ` ${styles.fixStepRisky}` : ""}`}>
                                           <div className={styles.fixStepHeader}>
                                             <span className={styles.fixStepLabel}>{step.label}</span>
                                           </div>
