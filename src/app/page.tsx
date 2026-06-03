@@ -2,7 +2,7 @@
 import { useCallback, useEffect, useRef, useState, useMemo } from "react";
 import type { AnalysisResult, ProcessInfo, TreeNode, RuleConfig, ProcessProfile, AiSetupPhase } from "@/lib/types";
 import { MANUAL_PROFILE_ID } from "@/lib/profiles";
-import { buildTree, findNode, groupNodes } from "@/lib/processTree";
+import { buildTree, findNode, groupWithHelpers } from "@/lib/processTree";
 import Header from "@/components/Header";
 import ProcessGrid from "@/components/ProcessGrid";
 import MindMap from "@/components/MindMap";
@@ -255,6 +255,8 @@ export default function Home() {
     for (const g of currentGroups) {
       const rule = currentRules[g.name];
       if (rule && rule.autoKillMins) {
+        const targetName = normalizeName(g.name);
+        const killTargets = g.children.filter(child => normalizeName(child.name) === targetName && child.id > 0);
         const state = tracker[g.name];
         if (!state) {
           tracker[g.name] = { lastCpu: g.cpu, idleSince: now };
@@ -262,9 +264,13 @@ export default function Home() {
           if (state.lastCpu === g.cpu) {
             const idleMins = (now - state.idleSince) / 60000;
             if (idleMins >= rule.autoKillMins) {
+              if (killTargets.length === 0) {
+                delete tracker[g.name];
+                continue;
+              }
               addAuditEvent("auto-kill", `Auto-killed ${g.name} after ${rule.autoKillMins} idle minute(s)`);
               sendNotification("TaskFish auto-kill", `${g.name} was inactive for ${rule.autoKillMins} minute(s).`);
-              g.children.forEach(child => {
+              killTargets.forEach(child => {
                 if (window.electron) {
                   window.electron.killProcess(child.id, true).catch(() => {});
                 } else {
@@ -446,8 +452,7 @@ export default function Home() {
       }
 
       const flatRoots = buildTree(data.processes || []);
-      const displayCandidates = (data.processes || []).map(p => ({ ...p, children: [] } as TreeNode));
-      const newGroups = groupNodes(displayCandidates);
+      const newGroups = groupWithHelpers(data.processes || []);
 
       setProcesses(data.processes);
       setRoots(flatRoots);

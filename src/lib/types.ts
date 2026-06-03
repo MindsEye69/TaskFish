@@ -58,6 +58,7 @@ export interface ProcessGroup {
 
 export interface TreeNode extends ProcessInfo {
   children: TreeNode[];
+  helperCounts?: Record<string, number>;
 }
 
 export interface AnalysisResult {

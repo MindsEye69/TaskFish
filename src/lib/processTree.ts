@@ -102,6 +102,93 @@ export function groupNodes(nodes: TreeNode[]): TreeNode[] {
   return result;
 }
 
+const HELPER_NAMES = new Set(["conhost", "cmd", "werfault", "werfaultsecure"]);
+
+function normalizeProcessName(name: string) {
+  return (name || "").toLowerCase().replace(/\.exe$/i, "");
+}
+
+function isHelperProcess(name: string) {
+  return HELPER_NAMES.has(normalizeProcessName(name));
+}
+
+function isClearParentProcess(proc: ProcessInfo) {
+  return proc.trust !== "unknown" && proc.category !== "unknown";
+}
+
+/**
+ * Like groupNodes, but absorbs known helper processes (conhost, cmd) into
+ * the group node of their closest clear non-helper ancestor. Orphaned helpers
+ * and helpers owned by unknown parents stay as their own group.
+ */
+export function groupWithHelpers(flat: ProcessInfo[]): TreeNode[] {
+  const groups = groupNodes(flat.map(p => ({ ...p, children: [] } as TreeNode)));
+
+  const pidMap = new Map(flat.map(p => [p.id, p]));
+  const pidToGroup = new Map<number, TreeNode>();
+  for (const group of groups) {
+    const groupName = normalizeProcessName(group.name);
+    for (const child of group.children) {
+      if (normalizeProcessName(child.name) === groupName) {
+        pidToGroup.set(child.id, group);
+      }
+    }
+  }
+
+  const resolveClearParentGroup = (proc: ProcessInfo): TreeNode | null => {
+    const seen = new Set<number>([proc.id]);
+    let parent = pidMap.get(proc.ppid);
+
+    while (parent && !seen.has(parent.id)) {
+      seen.add(parent.id);
+      if (isHelperProcess(parent.name)) {
+        parent = pidMap.get(parent.ppid);
+        continue;
+      }
+
+      if (!isClearParentProcess(parent)) return null;
+      return pidToGroup.get(parent.id) ?? null;
+    }
+
+    return null;
+  };
+
+  const toRemove = new Set<TreeNode>();
+
+  for (const group of groups) {
+    if (!isHelperProcess(group.name)) continue;
+
+    const helperName = normalizeProcessName(group.name);
+    const remaining: TreeNode[] = [];
+
+    for (const child of group.children) {
+      const parentGroup = resolveClearParentGroup(child);
+      if (!parentGroup || parentGroup === group) {
+        remaining.push(child);
+        continue;
+      }
+
+      parentGroup.children.push(child);
+      parentGroup.ramMB = Math.round((parentGroup.ramMB + child.ramMB) * 10) / 10;
+      parentGroup.cpu = Math.round((parentGroup.cpu + child.cpu) * 10) / 10;
+      parentGroup.handles += child.handles;
+      if (!parentGroup.helperCounts) parentGroup.helperCounts = {};
+      parentGroup.helperCounts[helperName] = (parentGroup.helperCounts[helperName] || 0) + 1;
+    }
+
+    if (remaining.length === 0) {
+      toRemove.add(group);
+    } else {
+      group.children = remaining;
+      group.ramMB = Math.round(remaining.reduce((s, c) => s + c.ramMB, 0) * 10) / 10;
+      group.cpu = Math.round(remaining.reduce((s, c) => s + c.cpu, 0) * 10) / 10;
+      group.handles = remaining.reduce((s, c) => s + c.handles, 0);
+    }
+  }
+
+  return groups.filter(g => !toRemove.has(g));
+}
+
 /** Recursively count all unique process IDs in a tree branch */
 export function countAllPids(node: TreeNode): number {
   const pids = new Set<number>();

@@ -85,6 +85,17 @@ function sortNodes(nodes: TreeNode[], sort: Sort): TreeNode[] {
   });
 }
 
+function normalizeName(name: string) {
+  return (name || "").toLowerCase().replace(/\.exe$/i, "");
+}
+
+function primaryProcess(node: TreeNode): TreeNode {
+  if (node.id > 0) return node;
+  return node.children.find(child => normalizeName(child.name) === normalizeName(node.name))
+    ?? node.children.find(child => child.id > 0)
+    ?? node;
+}
+
 export default function ProcessGrid({
   roots,
   rules,
@@ -142,6 +153,7 @@ export default function ProcessGrid({
   const renderCard = (node: TreeNode, featured: boolean, inUnknownTier = false) => {
     const isExpanded  = expandedIds.has(node.id);
     const hasChildren = node.children.length > 0;
+    const primary = primaryProcess(node);
     return (
       <div
         key={node.id}
@@ -159,11 +171,11 @@ export default function ProcessGrid({
           isExpandable={hasChildren}
           isExpanded={isExpanded}
           onExpand={() => toggleExpand(node.id)}
-          onClick={() => onSelect(node)}
-          onAnalyze={() => onAnalyze(node)}
+          onClick={() => hasChildren ? toggleExpand(node.id) : onSelect(primary)}
+          onAnalyze={() => onAnalyze(primary)}
           analyzeDisabled={!aiAvailable}
           aiSetupPhase={aiSetupPhase}
-          onQuickVerify={inUnknownTier ? () => onQuickVerify(node) : undefined}
+          onQuickVerify={inUnknownTier ? () => onQuickVerify(primary) : undefined}
           featured={featured}
         />
         {isExpanded && (

@@ -55,7 +55,10 @@ export default function ProcessCard({
 }: Props) {
   const [iconError, setIconError] = useState(false);
   const ramPct = Math.min(100, (node.ramMB / Math.max(maxRam, 1)) * 100);
-  const childCount = useMemo(() => countAllPids(node) - 1, [node]);
+  const childCount = useMemo(() => {
+    const total = countAllPids(node);
+    return node.id < 0 ? total : Math.max(0, total - 1);
+  }, [node]);
   const sparkPath = useMemo(() => {
     const points = history.slice(-24);
     if (points.length < 2) return "";
@@ -163,6 +166,14 @@ export default function ProcessCard({
         </svg>
       )}
 
+      {!isExpanded && node.helperCounts && Object.keys(node.helperCounts).length > 0 && (
+        <div className={styles.helperBadges}>
+          {Object.entries(node.helperCounts).map(([name, count]) => (
+            <span key={name} className={styles.helperBadge}>+{count} {name}</span>
+          ))}
+        </div>
+      )}
+
       <div className={styles.cardFooter}>
         {childCount > 0 && (
           <div className={styles.children}>
@@ -173,7 +184,9 @@ export default function ProcessCard({
               <line x1="2" y1="2" x2="8" y2="5" stroke="currentColor" strokeWidth="0.8" />
               <line x1="2" y1="8" x2="8" y2="5" stroke="currentColor" strokeWidth="0.8" />
             </svg>
-            {childCount} subprocess{childCount !== 1 ? "es" : ""}
+            {childCount} {node.id < 0
+              ? `process${childCount !== 1 ? "es" : ""}`
+              : `subprocess${childCount !== 1 ? "es" : ""}`}
           </div>
         )}
         {onQuickVerify && (
