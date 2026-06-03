@@ -44,6 +44,7 @@ yarn-error.log*
 
 # local agent/tool state
 /.codegraph/
+/.claude/
 /.chatboks/
 /.cursor/
 /chatboks.md
