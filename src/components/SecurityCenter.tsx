@@ -90,6 +90,7 @@ export default function SecurityCenter({
   const [fixResults, setFixResults] = useState<Record<string, EventFixResult>>({});
   const [loadingFixes, setLoadingFixes] = useState<Set<string>>(new Set());
   const [copiedCmd, setCopiedCmd] = useState<string | null>(null);
+  const [showResults, setShowResults] = useState(false);
 
   const toggleCategory = useCallback((cat: string) => {
     setExpandedCategories(prev => {
@@ -125,6 +126,7 @@ export default function SecurityCenter({
       const result = await window.electron.importEventLog();
       if (result.ok && result.report) {
         setEventReport(result.report);
+        setShowResults(false);
       } else if (!result.canceled) {
         setEventImportError(result.error || "Event log import failed.");
       }
@@ -298,74 +300,94 @@ export default function SecurityCenter({
               <span>Likely noise <strong>{eventReport.clusters.filter(c => c.category === "likely-noise").length.toLocaleString()}</strong></span>
             </div>
 
-            {(["needs-attention", "watch", "likely-noise"] as const).map(cat => {
-              const catClusters: EventCluster[] = eventReport.clusters.filter(c => c.category === cat);
-              if (catClusters.length === 0) return null;
-              const isCatExpanded = expandedCategories.has(cat);
-              return (
-                <div key={cat} className={styles.categorySection}>
-                  <div
-                    className={`${styles.categoryHeader} ${styles[cat.replace("-", "")]}`}
-                    onClick={() => toggleCategory(cat)}
-                    style={{ cursor: "pointer", userSelect: "none" }}
-                  >
-                    <span>{CATEGORY_LABELS[cat]}</span>
-                    <span className={styles.categoryCount}>{catClusters.length}</span>
-                    <button
-                      type="button"
-                      className={styles.expandBtn}
-                      onClick={e => { e.stopPropagation(); toggleCategory(cat); }}
-                      aria-label={isCatExpanded ? "Collapse category" : "Expand category"}
-                      style={{ marginLeft: "auto" }}
-                    >
-                      {isCatExpanded ? "−" : "+"}
-                    </button>
-                  </div>
-                  {isCatExpanded && <div className={styles.clusterList}>
-                    {catClusters.map(cluster => {
-                      const lc = LEVEL_COLORS[cluster.level] ?? LEVEL_COLORS[4];
-                      const isExpanded = expandedClusters.has(cluster.key);
-                      return (
-                        <div key={cluster.key} className={styles.clusterRow}>
-                          <div className={styles.clusterMain}>
-                            <span className={styles.levelBadge} style={{ background: lc.bg, color: lc.color }}>
-                              {cluster.levelName}
-                            </span>
-                            <span className={styles.clusterProvider}>
-                              {cluster.provider.replace(/^Microsoft-Windows-/, "")} - {cluster.eventId}
-                            </span>
-                            <span className={styles.clusterCount}>&times;{cluster.count}</span>
-                            <span className={styles.clusterSummary}>{cluster.summary}</span>
-                            <button
-                              type="button"
-                              className={styles.expandBtn}
-                              onClick={() => toggleCluster(cluster.key)}
-                              aria-label={isExpanded ? "Collapse" : "Expand"}
-                            >
-                              {isExpanded ? "-" : "+"}
-                            </button>
-                          </div>
-                          {isExpanded && (
-                            <div className={styles.clusterDetails}>
-                              <div><span className={styles.detailLabel}>Provider:</span> {cluster.provider}</div>
-                              {cluster.firstSeen && (
-                                <div><span className={styles.detailLabel}>First seen:</span> {new Date(cluster.firstSeen).toLocaleString()}</div>
-                              )}
-                              {cluster.lastSeen && cluster.lastSeen !== cluster.firstSeen && (
-                                <div><span className={styles.detailLabel}>Last seen:</span> {new Date(cluster.lastSeen).toLocaleString()}</div>
-                              )}
-                              {cluster.sampleMessage && (
-                                <div className={styles.clusterMessage}>{cluster.sampleMessage.slice(0, 300)}</div>
+            {eventReport.overallHealth === "good" && !showResults ? (
+              <div style={{ display: "flex", alignItems: "center", gap: "12px", flexWrap: "wrap", padding: "4px 0" }}>
+                <span style={{ flex: 1, fontSize: "12px", color: "var(--text-muted)", fontStyle: "italic", lineHeight: 1.5, minWidth: "200px" }}>
+                  No critical or warning clusters detected. This log appears healthy.
+                </span>
+                <button
+                  type="button"
+                  className={styles.importBtn}
+                  onClick={() => {
+                    setShowResults(true);
+                    setExpandedCategories(prev => new Set([...prev, "likely-noise"]));
+                  }}
+                >
+                  Review Results
+                </button>
+              </div>
+            ) : (
+              <>
+                {(["needs-attention", "watch", "likely-noise"] as const).map(cat => {
+                  const catClusters: EventCluster[] = eventReport.clusters.filter(c => c.category === cat);
+                  if (catClusters.length === 0) return null;
+                  const isCatExpanded = expandedCategories.has(cat);
+                  return (
+                    <div key={cat} className={styles.categorySection}>
+                      <div
+                        className={`${styles.categoryHeader} ${styles[cat.replace("-", "")]}`}
+                        onClick={() => toggleCategory(cat)}
+                        style={{ cursor: "pointer", userSelect: "none" }}
+                      >
+                        <span>{CATEGORY_LABELS[cat]}</span>
+                        <span className={styles.categoryCount}>{catClusters.length}</span>
+                        <button
+                          type="button"
+                          className={styles.expandBtn}
+                          onClick={e => { e.stopPropagation(); toggleCategory(cat); }}
+                          aria-label={isCatExpanded ? "Collapse category" : "Expand category"}
+                          style={{ marginLeft: "auto" }}
+                        >
+                          {isCatExpanded ? "−" : "+"}
+                        </button>
+                      </div>
+                      {isCatExpanded && <div className={styles.clusterList}>
+                        {catClusters.map(cluster => {
+                          const lc = LEVEL_COLORS[cluster.level] ?? LEVEL_COLORS[4];
+                          const isExpanded = expandedClusters.has(cluster.key);
+                          return (
+                            <div key={cluster.key} className={styles.clusterRow}>
+                              <div className={styles.clusterMain}>
+                                <span className={styles.levelBadge} style={{ background: lc.bg, color: lc.color }}>
+                                  {cluster.levelName}
+                                </span>
+                                <span className={styles.clusterProvider}>
+                                  {cluster.provider.replace(/^Microsoft-Windows-/, "")} - {cluster.eventId}
+                                </span>
+                                <span className={styles.clusterCount}>&times;{cluster.count}</span>
+                                <span className={styles.clusterSummary}>{cluster.summary}</span>
+                                <button
+                                  type="button"
+                                  className={styles.expandBtn}
+                                  onClick={() => toggleCluster(cluster.key)}
+                                  aria-label={isExpanded ? "Collapse" : "Expand"}
+                                >
+                                  {isExpanded ? "-" : "+"}
+                                </button>
+                              </div>
+                              {isExpanded && (
+                                <div className={styles.clusterDetails}>
+                                  <div><span className={styles.detailLabel}>Provider:</span> {cluster.provider}</div>
+                                  {cluster.firstSeen && (
+                                    <div><span className={styles.detailLabel}>First seen:</span> {new Date(cluster.firstSeen).toLocaleString()}</div>
+                                  )}
+                                  {cluster.lastSeen && cluster.lastSeen !== cluster.firstSeen && (
+                                    <div><span className={styles.detailLabel}>Last seen:</span> {new Date(cluster.lastSeen).toLocaleString()}</div>
+                                  )}
+                                  {cluster.sampleMessage && (
+                                    <div className={styles.clusterMessage}>{cluster.sampleMessage.slice(0, 300)}</div>
+                                  )}
+                                </div>
                               )}
                             </div>
-                          )}
-                        </div>
-                      );
-                    })}
-                  </div>}
-                </div>
-              );
-            })}
+                          );
+                        })}
+                      </div>}
+                    </div>
+                  );
+                })}
+              </>
+            )}
 
             {eventAnalysis && (
               <div className={styles.findingsSection}>
