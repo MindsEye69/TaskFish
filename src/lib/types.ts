@@ -1,4 +1,19 @@
-import type { EventHealthReport, EventHealthAnalysis } from "./eventLog";
+import type { EventHealthReport, EventHealthAnalysis, EventHealthFinding, EventCluster } from "./eventLog";
+
+export interface EventFixStep {
+  label: string;
+  instruction: string;
+  command?: string;
+  warning?: string;
+}
+
+export interface EventFixResult {
+  title: string;
+  rootCauses: string[];
+  steps: EventFixStep[];
+  escalation: string;
+  error?: string;
+}
 
 export type TrustLevel = "trusted" | "verified" | "background" | "unknown";
 export type Category = "system" | "user" | "background" | "unknown";
@@ -109,6 +124,7 @@ declare global {
       getProcessServices: (pid: number) => Promise<any[]>;
       importEventLog: () => Promise<{ ok: boolean; canceled?: boolean; error?: string; report?: EventHealthReport }>;
       analyzeEventHealth: (report: EventHealthReport, forceRefresh?: boolean) => Promise<EventHealthAnalysis & { error?: string }>;
+      getEventFix: (finding: EventHealthFinding, cluster: EventCluster) => Promise<EventFixResult>;
     };
   }
 }

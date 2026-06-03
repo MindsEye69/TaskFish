@@ -1625,6 +1625,160 @@ ipcMain.handle("analyze-event-health", async (_event, report: EventHealthReport,
   return result;
 });
 
+// --- EVENT FIX ASSISTANT ---
+
+interface EventFixStep {
+  label: string;
+  instruction: string;
+  command?: string;
+  warning?: string;
+}
+
+interface EventFixResult {
+  title: string;
+  rootCauses: string[];
+  steps: EventFixStep[];
+  escalation: string;
+  error?: string;
+}
+
+const eventFixCachePath = path.join(userDataPath, "event_fix_cache.json");
+
+const EVENT_FIX_PROMPT = (
+  clusterId: string,
+  provider: string,
+  eventId: number,
+  levelName: string,
+  count: number,
+  firstSeen: string,
+  lastSeen: string,
+  summary: string,
+  sampleMessage: string,
+  explanation: string,
+  evidence: string[],
+): string =>
+  `You are a Windows system repair expert. A user's PC has this specific Windows Event Log problem and needs step-by-step fix instructions.
+
+Event details:
+- Cluster ID: ${clusterId}
+- Provider: ${provider}
+- Event ID: ${eventId}
+- Level: ${levelName}
+- Occurrences: ${count} times
+- First seen: ${firstSeen || "unknown"}
+- Last seen: ${lastSeen || "unknown"}
+- Summary: ${summary}
+- AI explanation: ${explanation}
+- Evidence: ${evidence.join("; ")}
+${sampleMessage ? `- Sample message: ${sampleMessage.slice(0, 300)}` : ""}
+
+Respond with ONLY strict JSON matching this schema (no markdown, no extra text):
+{
+  "title": "Short fix title (what we are fixing)",
+  "rootCauses": ["Most likely cause 1", "Possible cause 2"],
+  "steps": [
+    {
+      "label": "Step name (5 words max)",
+      "instruction": "Plain English instruction for this step",
+      "command": "optional PowerShell or CMD command the user can run directly (omit if not applicable)",
+      "warning": "optional safety note if this step has risk (omit if safe)"
+    }
+  ],
+  "escalation": "One sentence on when to call a professional or escalate beyond self-repair"
+}
+
+Rules:
+- Steps must be concrete, numbered actions specific to this event, not generic advice
+- Include PowerShell commands where they make the step easier and safer (e.g., checking disk health, viewing specific logs, restarting services)
+- Commands must be real, working Windows commands — no placeholders
+- Maximum 7 steps; focus on the most impactful actions
+- If the event is usually benign (e.g. DistributedCOM 10016), say so in title and keep steps minimal
+- Do NOT suggest reinstalling Windows unless all else has failed`;
+
+ipcMain.handle("get-event-fix", async (_event, finding: EventHealthFinding, cluster: EventCluster) => {
+  if (!finding || !cluster) return { error: "Invalid input", title: "", rootCauses: [], steps: [], escalation: "" };
+
+  const cacheKey = `fix:${finding.clusterId}`;
+  const cache = loadJson(eventFixCachePath) as Record<string, EventFixResult>;
+  if (cache[cacheKey]) return cache[cacheKey];
+
+  const model = await getBestModel();
+  if (!model) {
+    const result: EventFixResult = {
+      title: `Fix: ${finding.clusterId}`,
+      rootCauses: ["AI model not available — showing basic guidance"],
+      steps: finding.safeNextSteps.map((s, i) => ({ label: `Step ${i + 1}`, instruction: s })),
+      escalation: "Contact a professional if the issue persists after following these steps.",
+    };
+    cache[cacheKey] = result;
+    saveJson(eventFixCachePath, cache);
+    return result;
+  }
+
+  const prompt = EVENT_FIX_PROMPT(
+    finding.clusterId,
+    cluster.provider,
+    cluster.eventId,
+    cluster.levelName,
+    cluster.count,
+    cluster.firstSeen,
+    cluster.lastSeen,
+    cluster.summary,
+    cluster.sampleMessage,
+    finding.explanation,
+    finding.evidence,
+  );
+
+  try {
+    const response = await fetch("http://localhost:11434/api/generate", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model, prompt, stream: false, format: "json" }),
+      signal: AbortSignal.timeout(90000),
+    });
+    const data = await response.json() as { error?: unknown; response?: string };
+    if (!data.error && typeof data.response === "string") {
+      const parsed = JSON.parse(data.response) as unknown;
+      if (parsed && typeof parsed === "object") {
+        const r = parsed as Record<string, unknown>;
+        const steps: EventFixStep[] = Array.isArray(r.steps)
+          ? (r.steps as unknown[]).filter((s): s is EventFixStep => {
+              if (!s || typeof s !== "object") return false;
+              const obj = s as Record<string, unknown>;
+              return typeof obj.label === "string" && typeof obj.instruction === "string";
+            }).slice(0, 7)
+          : finding.safeNextSteps.map((s, i) => ({ label: `Step ${i + 1}`, instruction: s }));
+
+        const result: EventFixResult = {
+          title: typeof r.title === "string" ? r.title.slice(0, 120) : `Fix: ${finding.clusterId}`,
+          rootCauses: Array.isArray(r.rootCauses)
+            ? (r.rootCauses as unknown[]).filter((c): c is string => typeof c === "string").slice(0, 4)
+            : [],
+          steps,
+          escalation: typeof r.escalation === "string" ? r.escalation.slice(0, 400) : "",
+        };
+        cache[cacheKey] = result;
+        saveJson(eventFixCachePath, cache);
+        return result;
+      }
+    }
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    if (!msg.includes("ECONNREFUSED") && !msg.includes("connect")) log("get-event-fix error: " + msg);
+  }
+
+  // Fallback to safeNextSteps
+  const result: EventFixResult = {
+    title: `Fix: ${finding.clusterId}`,
+    rootCauses: [],
+    steps: finding.safeNextSteps.map((s, i) => ({ label: `Step ${i + 1}`, instruction: s })),
+    escalation: "Contact a professional if the issue persists.",
+  };
+  cache[cacheKey] = result;
+  saveJson(eventFixCachePath, cache);
+  return result;
+});
+
 ipcMain.handle("import-event-log", async () => {
   if (!mainWindow) return { ok: false, error: "No window available" };
 

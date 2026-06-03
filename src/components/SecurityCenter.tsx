@@ -1,6 +1,6 @@
 "use client";
 import { useState, useMemo, useCallback } from "react";
-import type { AiSetupPhase, ProcessInfo, ProcessProfile, RuleConfig } from "@/lib/types";
+import type { AiSetupPhase, ProcessInfo, ProcessProfile, RuleConfig, EventFixResult, EventFixStep } from "@/lib/types";
 import type { EventHealthReport, EventCluster, EventHealthAnalysis, EventHealthFinding } from "@/lib/eventLog";
 import styles from "./SecurityCenter.module.css";
 
@@ -87,6 +87,9 @@ export default function SecurityCenter({
   const [eventAnalysis, setEventAnalysis] = useState<EventHealthAnalysis | null>(null);
   const [analyzingEvents, setAnalyzingEvents] = useState(false);
   const [expandedFindings, setExpandedFindings] = useState<Set<string>>(new Set());
+  const [fixResults, setFixResults] = useState<Record<string, EventFixResult>>({});
+  const [loadingFixes, setLoadingFixes] = useState<Set<string>>(new Set());
+  const [copiedCmd, setCopiedCmd] = useState<string | null>(null);
 
   const toggleCategory = useCallback((cat: string) => {
     setExpandedCategories(prev => {
@@ -144,14 +147,34 @@ export default function SecurityCenter({
     }
   }, [eventReport, analyzingEvents, eventAnalysis]);
 
-  const handleSearchEventFix = useCallback(async (finding: EventHealthFinding) => {
-    const searchQuery = `${finding.clusterId} Windows fix ${finding.explanation}`.slice(0, 100);
-    if (window.electron?.notify) {
-      window.electron.notify("Finding solutions", `Searching for detailed fix instructions for ${finding.clusterId}...`);
+  const handleGetFix = useCallback(async (finding: EventHealthFinding, cluster: EventCluster) => {
+    if (!window.electron?.getEventFix) return;
+    if (loadingFixes.has(finding.clusterId)) return;
+    if (fixResults[finding.clusterId]) return; // already loaded
+
+    setLoadingFixes(prev => new Set(prev).add(finding.clusterId));
+    try {
+      const result = await window.electron.getEventFix(finding, cluster);
+      setFixResults(prev => ({ ...prev, [finding.clusterId]: result }));
+    } catch {
+      setFixResults(prev => ({
+        ...prev,
+        [finding.clusterId]: {
+          title: `Fix: ${finding.clusterId}`,
+          rootCauses: [],
+          steps: finding.safeNextSteps.map((s, i) => ({ label: `Step ${i + 1}`, instruction: s })),
+          escalation: "Contact a professional if the issue persists.",
+        },
+      }));
+    } finally {
+      setLoadingFixes(prev => { const n = new Set(prev); n.delete(finding.clusterId); return n; });
     }
-    // TODO: Implement web search for finding solutions
-    // This will search online and generate detailed fix instructions
-    // For now, just show the safe next steps that are already provided
+  }, [loadingFixes, fixResults]);
+
+  const handleCopyCommand = useCallback((cmd: string) => {
+    navigator.clipboard.writeText(cmd).catch(() => {});
+    setCopiedCmd(cmd);
+    setTimeout(() => setCopiedCmd(c => c === cmd ? null : c), 2000);
   }, []);
 
   const totalRules = Object.keys(rules).filter(name => rules[name].action !== "NONE").length;
@@ -365,6 +388,9 @@ export default function SecurityCenter({
                         finding.severity === "critical" ? styles.severityCritical :
                         finding.severity === "warning" ? styles.severityWarning :
                         styles.severityInfo;
+                      const cluster = eventReport.clusters.find(c => c.key === finding.clusterId);
+                      const fix = fixResults[finding.clusterId];
+                      const isLoadingFix = loadingFixes.has(finding.clusterId);
                       return (
                         <div key={finding.clusterId} className={styles.findingCard}>
                           <div
@@ -382,7 +408,7 @@ export default function SecurityCenter({
                               onClick={e => { e.stopPropagation(); toggleFinding(finding.clusterId); }}
                               aria-label={isExpanded ? "Collapse" : "Expand"}
                             >
-                              {isExpanded ? "-" : "+"}
+                              {isExpanded ? "−" : "+"}
                             </button>
                           </div>
                           {isExpanded && (
@@ -395,29 +421,77 @@ export default function SecurityCenter({
                                   </ul>
                                 </div>
                               )}
-                              {finding.safeNextSteps.length > 0 && (
-                                <div className={styles.findingDetailSection}>
-                                  <div className={styles.findingDetailTitle}>Safe Next Steps</div>
-                                  <ul className={styles.findingDetailList}>
-                                    {finding.safeNextSteps.map((s, i) => <li key={i}>{s}</li>)}
-                                  </ul>
-                                </div>
-                              )}
                               {finding.whenToIgnore && (
                                 <div className={styles.findingIgnore}>
                                   When to ignore: {finding.whenToIgnore}
                                 </div>
                               )}
-                              <div className={styles.findingActions}>
-                                <button
-                                  type="button"
-                                  className={styles.helpFixBtn}
-                                  onClick={() => handleSearchEventFix(finding)}
-                                  title="Search online for detailed fix instructions"
-                                >
-                                  Help me fix this
-                                </button>
-                              </div>
+
+                              {/* Fix panel */}
+                              {!fix && !isLoadingFix && cluster && (
+                                <div className={styles.findingActions}>
+                                  <button
+                                    type="button"
+                                    className={styles.helpFixBtn}
+                                    onClick={() => handleGetFix(finding, cluster)}
+                                  >
+                                    Help me fix this
+                                  </button>
+                                </div>
+                              )}
+                              {isLoadingFix && (
+                                <div className={styles.fixLoading}>
+                                  <span className={styles.fixSpinner} />
+                                  Generating fix instructions...
+                                </div>
+                              )}
+                              {fix && (
+                                <div className={styles.fixPanel}>
+                                  <div className={styles.fixTitle}>{fix.title}</div>
+                                  {fix.rootCauses.length > 0 && (
+                                    <div className={styles.fixSection}>
+                                      <div className={styles.fixSectionLabel}>Likely causes</div>
+                                      <ul className={styles.fixCauseList}>
+                                        {fix.rootCauses.map((c, i) => <li key={i}>{c}</li>)}
+                                      </ul>
+                                    </div>
+                                  )}
+                                  <div className={styles.fixSection}>
+                                    <div className={styles.fixSectionLabel}>Fix steps</div>
+                                    <ol className={styles.fixStepList}>
+                                      {fix.steps.map((step: EventFixStep, i: number) => (
+                                        <li key={i} className={styles.fixStep}>
+                                          <div className={styles.fixStepHeader}>
+                                            <span className={styles.fixStepLabel}>{step.label}</span>
+                                          </div>
+                                          <div className={styles.fixStepInstruction}>{step.instruction}</div>
+                                          {step.command && (
+                                            <div className={styles.fixCmdBlock}>
+                                              <code className={styles.fixCmd}>{step.command}</code>
+                                              <button
+                                                type="button"
+                                                className={styles.fixCopyBtn}
+                                                onClick={() => handleCopyCommand(step.command!)}
+                                                title="Copy to clipboard"
+                                              >
+                                                {copiedCmd === step.command ? "Copied!" : "Copy"}
+                                              </button>
+                                            </div>
+                                          )}
+                                          {step.warning && (
+                                            <div className={styles.fixStepWarning}>
+                                              ⚠ {step.warning}
+                                            </div>
+                                          )}
+                                        </li>
+                                      ))}
+                                    </ol>
+                                  </div>
+                                  {fix.escalation && (
+                                    <div className={styles.fixEscalation}>{fix.escalation}</div>
+                                  )}
+                                </div>
+                              )}
                             </div>
                           )}
                         </div>
