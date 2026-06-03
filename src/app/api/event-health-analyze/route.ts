@@ -81,9 +81,9 @@ function deterministic(report: EventHealthReport): EventHealthAnalysis {
 
     if (key.includes("Kernel-Power:41") || key.includes(":6008")) {
       safeNextSteps = [
-        "Check Event Viewer for BSOD codes near the same timestamp",
-        "Run Windows Memory Diagnostic: Start > mdsched.exe",
         "Inspect power supply connections and UPS if present",
+        "Confirm whether the timestamp matches a power loss, forced shutdown, sleep/hibernate transition, or drained battery.",
+        "Watch for repeats before escalating to hardware diagnostics.",
       ];
       whenToIgnore = "Single occurrence immediately after a known power outage or deliberate shutdown.";
     } else if (key.includes("Service Control Manager")) {

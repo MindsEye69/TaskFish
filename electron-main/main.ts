@@ -1484,9 +1484,9 @@ function deterministicEventHealth(report: EventHealthReport): EventHealthAnalysi
 
     if (key.includes("Kernel-Power:41") || key.includes(":6008")) {
       safeNextSteps = [
-        "Check Event Viewer for BSOD codes near the same timestamp",
-        "Run Windows Memory Diagnostic: Start > mdsched.exe",
         "Inspect power supply connections and UPS if present",
+        "Confirm whether the timestamp matches a power loss, forced shutdown, sleep/hibernate transition, or drained battery.",
+        "Watch for repeats before escalating to hardware diagnostics.",
       ];
       whenToIgnore = "Single occurrence immediately after a known power outage or deliberate shutdown.";
     } else if (key.includes("Service Control Manager")) {
@@ -1673,6 +1673,7 @@ const EVENT_FIX_PROMPT = (
 ): string => {
   const isDcom = /distributedcom/i.test(provider) && (eventId === 10010 || eventId === 10016);
   const isWucEvent20 = /WindowsUpdateClient/i.test(provider) && eventId === 20;
+  const isKernelPower41 = /kernel-power/i.test(provider) && eventId === 41;
   const isWucError80073d02 = isWucEvent20 && /0x80073d02/i.test(sampleMessage);
   return `You are a Windows system repair expert. A user's PC has this Windows Event Log finding and needs safe, conservative fix guidance.
 
@@ -1693,6 +1694,9 @@ IMPORTANT — DistributedCOM Event ${eventId}: This is one of the most common Wi
 ` : ""}
 ${isWucEvent20 ? `
 IMPORTANT — WindowsUpdateClient Event 20${isWucError80073d02 ? " / error 0x80073d02" : ""}: ${isWucError80073d02 ? "Error 0x80073d02 means the update package is currently in use — the application is running and cannot be replaced. " : ""}Your response MUST: (1) title the fix as an app-in-use or package-locked conflict, NOT a Windows Update service error, (2) first steps MUST be: close the named application completely (including background and system-tray processes — verify via Task Manager), then sign out and back in or reboot, then retry the update via Microsoft Store or Windows Update, (3) if the sample message names a specific application (e.g., OpenAI.Codex), name that app explicitly in the close-app step, (4) do NOT suggest running a "Windows Update Troubleshooter" — this is not a Windows Update service failure, (5) if you include a Get-AppxPackage or Get-AppxProvisionedPackage command, label the step "Check package state" — never "Troubleshooter" or "Run troubleshooter", (6) do NOT suggest DISM /Online /Cleanup-Image /RestoreHealth — there is no evidence of component store corruption in this error.
+` : ""}
+${isKernelPower41 ? `
+IMPORTANT — Kernel-Power Event 41: If the message includes BugcheckCode 0, describe it as an unexpected shutdown or power loss with no recorded bugcheck. Do NOT title it "Bugcheck 0" and do NOT lead with hardware instability. First steps MUST check for power loss, forced shutdown, sleep/hibernate or battery drain, UPS/power cable issues, and whether the symptom repeats. Hardware, RAM, and disk diagnostics belong later as escalation unless the evidence includes a real bugcheck, disk errors, WHEA events, or repeated crashes.
 ` : ""}
 Respond with ONLY strict JSON matching this schema (no markdown, no extra text):
 {
@@ -1733,14 +1737,19 @@ const GUI_LAUNCH_CMD_RE = /\b(Start-Process|Invoke-Item|explorer(?:\.exe)?|cmd\s
 
 function normalizeCommandLine(line: string): string {
   return line
+    .replace(/[“”„‟]/g, "\"")
+    .replace(/[‘’‚‛]/g, "'")
     .replace(/^```(?:powershell|ps1|cmd|bat)?/i, "")
     .replace(/```$/i, "")
     .replace(/^PS\s+[^>]+>\s*/i, "")
     .replace(/^[$>]\s*/, "")
     .replace(/^(?:run|execute|type|command)\s*:?\s+/i, "")
-    .replace(/\s+(?:#|::|REM\b).*$/i, "")
+    .replace(/\s+(?:#|\/\/|::|REM\b).*$/i, "")
     .trim()
-    .replace(/^["'`]+|["'`]+$/g, "");
+    .replace(/^["'`]+|["'`]+$/g, "")
+    .split(",")[0]
+    .trim()
+    .replace(/[.;:]+$/g, "");
 }
 
 function cleanCommand(cmd: string): string | undefined {
@@ -1837,6 +1846,10 @@ function warningForStep(step: EventFixStep): string {
   return "";
 }
 
+function hasBugcheckCodeZero(text: string): boolean {
+  return /\bBugcheckCode\s*(?:[:=]|\s)\s*(?:0x)?0\b/i.test(text);
+}
+
 function removedUnsafeStep(isDcom: boolean): EventFixStep {
   return {
     label: "Unsafe step removed",
@@ -1850,9 +1863,12 @@ function removedUnsafeStep(isDcom: boolean): EventFixStep {
 function sanitizeFixResult(result: EventFixResult, provider: string, eventId: number, sampleMessage = ""): EventFixResult {
   const isDcom = /distributedcom/i.test(provider) && (eventId === 10010 || eventId === 10016);
   const isWucEvent20 = /WindowsUpdateClient/i.test(provider) && eventId === 20;
+  const isKernelPower41 = /kernel-power/i.test(provider) && eventId === 41;
   const wucText = `${sampleMessage} ${result.title} ${result.rootCauses.join(" ")} ${result.steps.map(s => `${s.label} ${s.instruction} ${s.command || ""}`).join(" ")}`;
   const isWucError80073d02 = isWucEvent20 && /0x80073d02/i.test(wucText);
   const updatedAppName = isWucError80073d02 ? extractUpdatedAppName(wucText) : "";
+  const kernelPowerText = `${sampleMessage} ${result.title} ${result.rootCauses.join(" ")} ${result.steps.map(s => `${s.label} ${s.instruction} ${s.command || ""}`).join(" ")}`;
+  const isKernelPowerBugcheckZero = isKernelPower41 && hasBugcheckCodeZero(kernelPowerText);
   let removedUnsafe = false;
 
   let steps: EventFixStep[] = result.steps.flatMap(step => {
@@ -1930,11 +1946,50 @@ function sanitizeFixResult(result: EventFixResult, provider: string, eventId: nu
     steps = steps.slice(0, 4);
   }
 
+  if (isKernelPower41) {
+    const firstLine = isKernelPowerBugcheckZero
+      ? "Kernel-Power Event 41 with BugcheckCode 0 means Windows recorded an unexpected shutdown or power loss without a crash dump or recorded bugcheck."
+      : "Kernel-Power Event 41 means Windows noticed the previous shutdown was unexpected.";
+    const firstSteps: EventFixStep[] = [
+      {
+        label: "Confirm shutdown cause",
+        instruction: `${firstLine} Check whether the timestamp matches a power outage, forced power-off, drained battery, sleep or hibernate transition, or accidental restart.`,
+      },
+      {
+        label: "Check power path",
+        instruction: "Inspect the power cable, outlet, laptop charger or battery, and UPS if present. If the system was intentionally powered off or lost power once, no repair may be needed.",
+      },
+      {
+        label: "Watch for repeats",
+        instruction: "Track whether the shutdown repeats under the same condition. Escalate to memory, disk, driver, or hardware diagnostics only if it recurs or nearby events show a real bugcheck, disk error, WHEA error, or device failure.",
+      },
+    ];
+    const existingLaterSteps = steps.filter(step => {
+      const text = `${step.label} ${step.instruction} ${step.command || ""}`;
+      return !/\b(bugcheck(?:code)?\s*0|memory diagnostic|mdsched|chkdsk|disk|hardware instability|power supply)\b/i.test(text);
+    });
+    steps = [...firstSteps, ...existingLaterSteps].slice(0, 5);
+    result = {
+      ...result,
+      rootCauses: [
+        "Unexpected shutdown or power loss with no recorded bugcheck",
+        "Forced shutdown, sleep/hibernate transition, drained battery, loose power cable, or UPS/power interruption",
+        "Hardware, RAM, disk, or driver issues only if the symptom repeats or nearby events support that evidence",
+      ],
+      escalation: result.escalation || "Escalate to hardware diagnostics if shutdowns repeat or nearby events show bugchecks, WHEA, disk, or device failures.",
+    };
+  }
+
   let title = isDcom && !/\b(noise|harmless|ignore)\b/i.test(result.title)
     ? `Usually noise: ${result.title}`.slice(0, 120)
     : result.title;
   if (isWucError80073d02 && !/\b(in use|locked|package|app)\b/i.test(title)) {
     title = `${updatedAppName ? `${updatedAppName} ` : ""}update package in use`.slice(0, 120);
+  }
+  if (isKernelPowerBugcheckZero && /\bbugcheck(?:code)?\s*0\b/i.test(title)) {
+    title = "Unexpected shutdown with no recorded bugcheck";
+  } else if (isKernelPower41 && !/\b(unexpected shutdown|power loss|kernel-power)\b/i.test(title)) {
+    title = `Unexpected shutdown: ${title}`.slice(0, 120);
   }
 
   return { ...result, title, steps };

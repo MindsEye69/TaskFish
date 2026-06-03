@@ -1182,6 +1182,7 @@ export default function Home() {
             onSaveProfile={handleSaveProfile}
             aiAvailable={aiAvailable}
             aiSetupPhase={aiSetupPhase}
+            onRecordStatus={addAuditEvent}
           />
         )}
       </div>

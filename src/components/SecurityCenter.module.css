@@ -634,6 +634,16 @@
   padding: 10px 12px;
 }
 
+.persistentErrorText {
+  font-size: 12px;
+  line-height: 1.5;
+  color: #fca5a5;
+  background: rgba(248, 113, 113, 0.06);
+  border: 1px solid rgba(248, 113, 113, 0.16);
+  border-radius: 8px;
+  padding: 9px 12px;
+}
+
 .eventStats {
   display: flex;
   flex-wrap: wrap;

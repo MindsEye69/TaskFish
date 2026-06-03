@@ -18,6 +18,7 @@ interface Props {
   onSaveProfile?: (name: string) => void;
   aiAvailable?: boolean;
   aiSetupPhase?: AiSetupPhase;
+  onRecordStatus?: (type: string, message: string, details?: unknown) => void;
 }
 
 const HEALTH_LABELS: Record<string, string> = {
@@ -125,12 +126,14 @@ export default function SecurityCenter({
   onSaveProfile,
   aiAvailable = true,
   aiSetupPhase = "ready",
+  onRecordStatus,
 }: Props) {
   const [searchQuery, setSearchQuery] = useState("");
   const [filterAction, setFilterAction] = useState<"ALL" | "ALLOW" | "LIMITED" | "BAN">("ALL");
   const [profileName, setProfileName] = useState("");
   const [eventReport, setEventReport] = useState<EventHealthReport | null>(null);
   const [eventImportError, setEventImportError] = useState("");
+  const [lastEventHealthError, setLastEventHealthError] = useState("");
   const [importingEvents, setImportingEvents] = useState(false);
   const [expandedClusters, setExpandedClusters] = useState<Set<string>>(new Set());
   const [expandedCategories, setExpandedCategories] = useState<Set<string>>(new Set(["needs-attention", "watch"]));
@@ -168,6 +171,13 @@ export default function SecurityCenter({
     });
   }, []);
 
+  const recordEventHealthError = useCallback((message: string, details: unknown = {}) => {
+    const exactMessage = message || "Unknown Event Health error";
+    setEventImportError(exactMessage);
+    setLastEventHealthError(exactMessage);
+    onRecordStatus?.("event-log", `Event Health error: ${exactMessage}`, details);
+  }, [onRecordStatus]);
+
   const handleImportEventLog = useCallback(async () => {
     if (!window.electron?.importEventLog) return;
     setImportingEvents(true);
@@ -182,14 +192,14 @@ export default function SecurityCenter({
         setEventReport(result.report);
         setShowResults(false);
       } else if (!result.canceled) {
-        setEventImportError(result.error || "Event log import failed.");
+        recordEventHealthError(result.error || "Event log import failed.", { phase: "import" });
       }
     } catch (err) {
-      setEventImportError(err instanceof Error ? err.message : String(err));
+      recordEventHealthError(err instanceof Error ? err.message : String(err), { phase: "import" });
     } finally {
       setImportingEvents(false);
     }
-  }, []);
+  }, [recordEventHealthError]);
 
   const handleAnalyzeEvents = useCallback(async () => {
     if (!eventReport || analyzingEvents || !window.electron?.analyzeEventHealth) return;
@@ -197,11 +207,17 @@ export default function SecurityCenter({
     try {
       const forceRefresh = Boolean(eventAnalysis);
       const data = await window.electron.analyzeEventHealth(eventReport, forceRefresh);
-      if (!data.error) setEventAnalysis(data);
-    } catch { /* ignore */ } finally {
+      if (!data.error) {
+        setEventAnalysis(data);
+      } else {
+        recordEventHealthError(data.error, { phase: "analyze", fileName: eventReport.fileName });
+      }
+    } catch (err) {
+      recordEventHealthError(err instanceof Error ? err.message : String(err), { phase: "analyze", fileName: eventReport.fileName });
+    } finally {
       setAnalyzingEvents(false);
     }
-  }, [eventReport, analyzingEvents, eventAnalysis]);
+  }, [eventReport, analyzingEvents, eventAnalysis, recordEventHealthError]);
 
   const handleGetFix = useCallback(async (finding: EventHealthFinding, cluster: EventCluster) => {
     if (!window.electron?.getEventFix) return;
@@ -211,8 +227,12 @@ export default function SecurityCenter({
     setLoadingFixes(prev => new Set(prev).add(finding.clusterId));
     try {
       const result = await window.electron.getEventFix(finding, cluster);
+      if (result.error) {
+        recordEventHealthError(result.error, { phase: "fix", clusterId: finding.clusterId });
+      }
       setFixResults(prev => ({ ...prev, [finding.clusterId]: result }));
-    } catch {
+    } catch (err) {
+      recordEventHealthError(err instanceof Error ? err.message : String(err), { phase: "fix", clusterId: finding.clusterId });
       setFixResults(prev => ({
         ...prev,
         [finding.clusterId]: {
@@ -225,7 +245,7 @@ export default function SecurityCenter({
     } finally {
       setLoadingFixes(prev => { const n = new Set(prev); n.delete(finding.clusterId); return n; });
     }
-  }, [loadingFixes, fixResults]);
+  }, [loadingFixes, fixResults, recordEventHealthError]);
 
   const handleCopyCommand = useCallback((cmd: string) => {
     navigator.clipboard.writeText(cmd).catch(() => {});
@@ -321,12 +341,13 @@ export default function SecurityCenter({
       const data = await window.electron.analyzeEventHealth(singleClusterReport, true);
       const finding = data.findings?.find(f => f.clusterId === cluster.key) ?? fallbackFinding;
       setClusterFindings(prev => ({ ...prev, [cluster.key]: finding }));
-    } catch {
+    } catch (err) {
+      recordEventHealthError(err instanceof Error ? err.message : String(err), { phase: "cluster-analyze", clusterKey: cluster.key });
       setClusterFindings(prev => ({ ...prev, [cluster.key]: fallbackFinding }));
     } finally {
       setAnalyzingClusters(prev => { const n = new Set(prev); n.delete(cluster.key); return n; });
     }
-  }, [analyzingClusters, buildClusterFinding, eventReport]);
+  }, [analyzingClusters, buildClusterFinding, eventReport, recordEventHealthError]);
 
   const handleClusterAdvice = useCallback((cluster: EventCluster) => {
     const finding = clusterFindings[cluster.key] ?? buildClusterFinding(cluster);
@@ -433,6 +454,9 @@ export default function SecurityCenter({
           </div>
         </div>
         {eventImportError && <div className={styles.errorText}>{eventImportError}</div>}
+        {lastEventHealthError && lastEventHealthError !== eventImportError && (
+          <div className={styles.persistentErrorText}>Last Event Health error: {lastEventHealthError}</div>
+        )}
 
         {!eventReport ? (
           <div className={styles.emptyText}>
