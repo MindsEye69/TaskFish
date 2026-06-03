@@ -1658,6 +1658,8 @@ const EVENT_FIX_PROMPT = (
   evidence: string[],
 ): string => {
   const isDcom = /distributedcom/i.test(provider) && (eventId === 10010 || eventId === 10016);
+  const isWucEvent20 = /WindowsUpdateClient/i.test(provider) && eventId === 20;
+  const isWucError80073d02 = isWucEvent20 && /0x80073d02/i.test(sampleMessage);
   return `You are a Windows system repair expert. A user's PC has this Windows Event Log finding and needs safe, conservative fix guidance.
 
 Event details:
@@ -1674,6 +1676,9 @@ Event details:
 ${sampleMessage ? `- Sample message: ${sampleMessage.slice(0, 300)}` : ""}
 ${isDcom ? `
 IMPORTANT — DistributedCOM Event ${eventId}: This is one of the most common Windows events across all versions and is almost always harmless background noise. Windows components silently request elevated COM permissions they do not actually need; the denial has no real effect. Your response MUST: (1) state in the title that this is usually noise, (2) advise checking for a real user-visible symptom before any action, (3) suggest Windows Update and a reboot as first steps, (4) never recommend DCOMCNFG, Component Services, or registry permission changes.
+` : ""}
+${isWucEvent20 ? `
+IMPORTANT — WindowsUpdateClient Event 20${isWucError80073d02 ? " / error 0x80073d02" : ""}: ${isWucError80073d02 ? "Error 0x80073d02 means the update package is currently in use — the application is running and cannot be replaced. " : ""}Your response MUST: (1) title the fix as an app-in-use or package-locked conflict, NOT a Windows Update service error, (2) first steps MUST be: close the named application completely (including background and system-tray processes — verify via Task Manager), then sign out and back in or reboot, then retry the update via Microsoft Store or Windows Update, (3) if the sample message names a specific application (e.g., OpenAI.Codex), name that app explicitly in the close-app step, (4) do NOT suggest running a "Windows Update Troubleshooter" — this is not a Windows Update service failure, (5) if you include a Get-AppxPackage or Get-AppxProvisionedPackage command, label the step "Check package state" — never "Troubleshooter" or "Run troubleshooter", (6) do NOT suggest DISM /Online /Cleanup-Image /RestoreHealth — there is no evidence of component store corruption in this error.
 ` : ""}
 Respond with ONLY strict JSON matching this schema (no markdown, no extra text):
 {
@@ -1707,6 +1712,24 @@ const FORBIDDEN_FIX_RE = /\b(dcomcnfg|component services|dcom\s+(appid|app id|ac
 const REGISTRY_FIX_RE = /\b(registry|regedit|HKLM|HKCU|HKEY_LOCAL_MACHINE|HKEY_CURRENT_USER|reg\s+(add|delete)|Set-ItemProperty|Remove-ItemProperty)\b/i;
 const FIREWALL_FIX_RE = /\b(firewall|netsh\s+advfirewall|Set-NetFirewallRule|New-NetFirewallRule)\b/i;
 const DESTRUCTIVE_FIX_RE = /\b(chkdsk\s+.*\/[fr]|delete|remove|reset|reinstall Windows)\b/i;
+
+function extractUpdatedAppName(text: string): string {
+  const patterns = [
+    /\bupdateTitle\s*[:=]\s*['"]?([^'",;\]\r\n]+)/i,
+    /\b(?:Package|App|Application)\s+((?:[A-Z0-9][A-Z0-9_-]*\.)+[A-Z0-9][A-Z0-9_-]*)\b/i,
+    /\b((?:[A-Z0-9][A-Z0-9_-]*\.)+[A-Z0-9][A-Z0-9_-]*)\b/i,
+  ];
+
+  for (const pattern of patterns) {
+    const match = text.match(pattern);
+    const candidate = match?.[1]?.trim().replace(/[.)\]}]+$/, "");
+    if (candidate && !/^0x[0-9a-f]+$/i.test(candidate) && !/^(Microsoft\.Windows|Windows\.|Event\.|Error\.)/i.test(candidate)) {
+      return candidate.slice(0, 80);
+    }
+  }
+
+  return "";
+}
 
 function isRiskyCmd(cmd: string): string {
   if (/\breg\s+(add|delete)\b/i.test(cmd) || /\b(Set|New|Remove)-ItemProperty\b/i.test(cmd)) {
@@ -1754,8 +1777,12 @@ function removedUnsafeStep(isDcom: boolean): EventFixStep {
   };
 }
 
-function sanitizeFixResult(result: EventFixResult, provider: string, eventId: number): EventFixResult {
+function sanitizeFixResult(result: EventFixResult, provider: string, eventId: number, sampleMessage = ""): EventFixResult {
   const isDcom = /distributedcom/i.test(provider) && (eventId === 10010 || eventId === 10016);
+  const isWucEvent20 = /WindowsUpdateClient/i.test(provider) && eventId === 20;
+  const wucText = `${sampleMessage} ${result.title} ${result.rootCauses.join(" ")} ${result.steps.map(s => `${s.label} ${s.instruction} ${s.command || ""}`).join(" ")}`;
+  const isWucError80073d02 = isWucEvent20 && /0x80073d02/i.test(wucText);
+  const updatedAppName = isWucError80073d02 ? extractUpdatedAppName(wucText) : "";
   let removedUnsafe = false;
 
   let steps: EventFixStep[] = result.steps.flatMap(step => {
@@ -1792,9 +1819,48 @@ function sanitizeFixResult(result: EventFixResult, provider: string, eventId: nu
     steps = steps.slice(0, 3);
   }
 
-  const title = isDcom && !/\b(noise|harmless|ignore)\b/i.test(result.title)
+  if (isWucEvent20) {
+    // Fix mislabeled steps: Get-AppxPackage commands labeled as "troubleshooter"
+    steps = steps.map(step => {
+      if (/troubleshooter/i.test(step.label) && /Get-Appx(Package|ProvisionedPackage)/i.test(step.command || "")) {
+        return { ...step, label: "Check package state" };
+      }
+      return step;
+    });
+    // Remove DISM /RestoreHealth — no corruption evidence for WUC Event 20 / 0x80073d02
+    const hasCorruptionEvidence = result.rootCauses.concat(steps.map(s => s.instruction)).some(t =>
+      /\b(corruption|corrupt|component store)\b/i.test(t)
+    );
+    if (!hasCorruptionEvidence) {
+      steps = steps.filter(step => !/\bRestoreHealth\b/i.test(`${step.instruction} ${step.command || ""}`));
+    }
+    // Ensure a close-and-reboot step leads if the AI didn't include one
+    const hasCloseStep = steps.some(step =>
+      /\b(close|quit|exit|terminate|end)\b/i.test(step.instruction) &&
+      /\b(app|application|program|process)\b/i.test(step.instruction)
+    );
+    const closeInstruction = `Close ${updatedAppName || "the affected application"} completely, including any background or system-tray processes. Open Task Manager (Ctrl+Shift+Esc) to confirm no related processes remain running. Then sign out and back in, or reboot, before retrying the update via Microsoft Store, Windows Update, or the app updater.`;
+    if (!hasCloseStep) {
+      steps = [{
+        label: (updatedAppName ? `${updatedAppName} and reboot` : "Close app and reboot").slice(0, 60),
+        instruction: closeInstruction,
+      }, ...steps];
+    }
+    if (updatedAppName && hasCloseStep && !steps[0]?.instruction.includes(updatedAppName)) {
+      steps = [{
+        ...steps[0],
+        instruction: `Close ${updatedAppName} completely before retrying this update. ${steps[0].instruction}`,
+      }, ...steps.slice(1)];
+    }
+    steps = steps.slice(0, 4);
+  }
+
+  let title = isDcom && !/\b(noise|harmless|ignore)\b/i.test(result.title)
     ? `Usually noise: ${result.title}`.slice(0, 120)
     : result.title;
+  if (isWucError80073d02 && !/\b(in use|locked|package|app)\b/i.test(title)) {
+    title = `${updatedAppName ? `${updatedAppName} ` : ""}update package in use`.slice(0, 120);
+  }
 
   return { ...result, title, steps };
 }
@@ -1805,7 +1871,7 @@ ipcMain.handle("get-event-fix", async (_event, finding: EventHealthFinding, clus
   const cacheKey = `fix:${finding.clusterId}`;
   const cache = loadJson(eventFixCachePath) as Record<string, EventFixResult>;
   if (cache[cacheKey]) {
-    const result = sanitizeFixResult(cache[cacheKey], cluster.provider, cluster.eventId);
+    const result = sanitizeFixResult(cache[cacheKey], cluster.provider, cluster.eventId, cluster.sampleMessage);
     if (JSON.stringify(result) !== JSON.stringify(cache[cacheKey])) {
       cache[cacheKey] = result;
       saveJson(eventFixCachePath, cache);
@@ -1821,7 +1887,7 @@ ipcMain.handle("get-event-fix", async (_event, finding: EventHealthFinding, clus
       steps: finding.safeNextSteps.map((s, i) => ({ label: `Step ${i + 1}`, instruction: s })),
       escalation: "Contact a professional if the issue persists after following these steps.",
     };
-    const result = sanitizeFixResult(rawResult, cluster.provider, cluster.eventId);
+    const result = sanitizeFixResult(rawResult, cluster.provider, cluster.eventId, cluster.sampleMessage);
     cache[cacheKey] = result;
     saveJson(eventFixCachePath, cache);
     return result;
@@ -1869,7 +1935,7 @@ ipcMain.handle("get-event-fix", async (_event, finding: EventHealthFinding, clus
           steps,
           escalation: typeof r.escalation === "string" ? r.escalation.slice(0, 400) : "",
         };
-        const result = sanitizeFixResult(rawResult, cluster.provider, cluster.eventId);
+        const result = sanitizeFixResult(rawResult, cluster.provider, cluster.eventId, cluster.sampleMessage);
         cache[cacheKey] = result;
         saveJson(eventFixCachePath, cache);
         return result;
@@ -1887,7 +1953,7 @@ ipcMain.handle("get-event-fix", async (_event, finding: EventHealthFinding, clus
     steps: finding.safeNextSteps.map((s, i) => ({ label: `Step ${i + 1}`, instruction: s })),
     escalation: "Contact a professional if the issue persists.",
   };
-  const result = sanitizeFixResult(rawResult, cluster.provider, cluster.eventId);
+  const result = sanitizeFixResult(rawResult, cluster.provider, cluster.eventId, cluster.sampleMessage);
   cache[cacheKey] = result;
   saveJson(eventFixCachePath, cache);
   return result;
