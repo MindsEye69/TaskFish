@@ -1443,7 +1443,7 @@ Respond with only strict JSON matching this schema:
 Rules:
 - Analyze clusters, not raw events.
 - Only include findings for needs-attention or watch clusters; skip likely-noise entirely.
-- DistributedCOM 10016 is info severity, low confidence, and usually benign Windows noise.
+- DistributedCOM 10010 and 10016 are info severity and low confidence by default. Treat them as likely noise unless correlated crash, service-failure, or user-symptom evidence exists in the clusters; even then, do not make them critical or high confidence by themselves.
 - Kernel-Power 41 and unexpected shutdowns are critical severity, high confidence.
 - disk or ntfs events are critical severity regardless of count.
 - Failed logins 4625: high count is critical; low count is warning.
@@ -1452,16 +1452,24 @@ Rules:
 
 function deterministicEventHealth(report: EventHealthReport): EventHealthAnalysis {
   const findings: EventHealthFinding[] = [];
+  const hasCorrelatedAppFailure = report.clusters.some(c =>
+    !/distributedcom/i.test(c.provider) && (
+      (/Application (Error|Hang)|Windows Error Reporting/i.test(c.provider) && [1000, 1001, 1002].includes(c.eventId)) ||
+      (/Service Control Manager/i.test(c.provider) && [7023, 7031, 7034].includes(c.eventId))
+    )
+  );
 
   for (const cluster of report.clusters) {
     if (cluster.category === "likely-noise") continue;
+    const isDcom = /DistributedCOM/i.test(cluster.provider) && (cluster.eventId === 10010 || cluster.eventId === 10016);
 
     const severity: EventHealthFinding["severity"] =
+      isDcom ? "info" :
       cluster.level === 1 ? "critical" :
       cluster.level === 2 ? (cluster.count >= 5 ? "critical" : "warning") : "warning";
 
     const confidence: EventHealthFinding["confidence"] =
-      cluster.level === 1 ? "high" : cluster.level === 2 ? "medium" : "low";
+      isDcom ? "low" : cluster.level === 1 ? "high" : cluster.level === 2 ? "medium" : "low";
 
     const evidence: string[] = [`Occurred ${cluster.count} time${cluster.count !== 1 ? "s" : ""}`];
     if (cluster.firstSeen) evidence.push(`First seen: ${new Date(cluster.firstSeen).toLocaleString()}`);
@@ -1508,9 +1516,15 @@ function deterministicEventHealth(report: EventHealthReport): EventHealthAnalysi
         "Back up important data immediately before further investigation",
       ];
       whenToIgnore = "Disk errors should almost never be ignored; investigate promptly.";
-    } else if (key.includes("DistributedCOM:10016")) {
-      safeNextSteps = ["Usually benign; no action required unless frequency is unusually high."];
-      whenToIgnore = "Very common Windows configuration noise; safe to ignore if the system is otherwise stable.";
+    } else if (isDcom) {
+      safeNextSteps = [
+        "Ignore unless symptomatic; DistributedCOM 10010/10016 is usually harmless Windows background noise.",
+        "If there are visible symptoms, correlate the timestamp with app crashes, service failures, or user-facing errors before changing anything.",
+        "Install Windows updates and reboot before considering app-specific repair.",
+      ];
+      whenToIgnore = hasCorrelatedAppFailure
+        ? "If the correlated app or service failure no longer occurs after update/reboot."
+        : "If the system is otherwise stable with no correlated app failures, crashes, or services failing to start.";
     } else if (key.includes("WindowsUpdateClient")) {
       safeNextSteps = [
         "Run Windows Update manually: Settings > Windows Update > Check for updates",
@@ -1713,6 +1727,62 @@ const REGISTRY_FIX_RE = /\b(registry|regedit|HKLM|HKCU|HKEY_LOCAL_MACHINE|HKEY_C
 const FIREWALL_FIX_RE = /\b(firewall|netsh\s+advfirewall|Set-NetFirewallRule|New-NetFirewallRule)\b/i;
 const DESTRUCTIVE_FIX_RE = /\b(chkdsk\s+.*\/[fr]|delete|remove|reset|reinstall Windows)\b/i;
 
+const REAL_TERMINAL_CMD_RE = /^(?:[|]\s*)?(Get-|Set-|Start-|Stop-|Restart-|Remove-|New-|Test-|Invoke-|Write-|Select-|Where-|Format-|Out-|sfc\b|dism\b|chkdsk\b|wevtutil\b|sc\s+\w|net\s+\w|reg\s+\w|powercfg\b|netsh\b|winver\b|powershell\b|bcdedit\b|icacls\b|shutdown\b|taskkill\b|tasklist\b|wmic\b|systeminfo\b|ipconfig\b|ping\b|tracert\b|Get-WinEvent\b|msiexec\b)/i;
+const GUI_OR_NAV_RE = /\b(open|navigate|go to|click|select|settings\s*>|control panel|event viewer|windows update|device manager|task manager|start menu|component services|services\.msc|eventvwr|devmgmt|msconfig|msinfo32|mdsched|regedit|ms-settings:|shell:AppsFolder)\b/i;
+const GUI_LAUNCH_CMD_RE = /\b(Start-Process|Invoke-Item|explorer(?:\.exe)?|cmd\s+\/c\s+start)\b.*\b(ms-settings:|eventvwr|devmgmt|services\.msc|msconfig|msinfo32|mdsched|regedit|control(?:\.exe)?\b|shell:AppsFolder)\b/i;
+
+function normalizeCommandLine(line: string): string {
+  return line
+    .replace(/^```(?:powershell|ps1|cmd|bat)?/i, "")
+    .replace(/```$/i, "")
+    .replace(/^PS\s+[^>]+>\s*/i, "")
+    .replace(/^[$>]\s*/, "")
+    .replace(/^(?:run|execute|type|command)\s*:?\s+/i, "")
+    .replace(/\s+(?:#|::|REM\b).*$/i, "")
+    .trim()
+    .replace(/^["'`]+|["'`]+$/g, "");
+}
+
+function cleanCommand(cmd: string): string | undefined {
+  const lines = cmd
+    .split(/\r?\n/)
+    .map(normalizeCommandLine)
+    .filter(line => line && !/^(#|REM\b|::)/i.test(line));
+  if (lines.length === 0) return undefined;
+  if (lines.some(line => GUI_OR_NAV_RE.test(line) || GUI_LAUNCH_CMD_RE.test(line) || !REAL_TERMINAL_CMD_RE.test(line))) return undefined;
+  return lines.join("\n");
+}
+
+function commandAsInstruction(cmd: string): string {
+  return cmd
+    .split(/\r?\n/)
+    .map(normalizeCommandLine)
+    .filter(line => line && (!REAL_TERMINAL_CMD_RE.test(line) || GUI_OR_NAV_RE.test(line) || GUI_LAUNCH_CMD_RE.test(line)))
+    .join(" ")
+    .slice(0, 300);
+}
+
+function buildEventFixCacheKey(finding: EventHealthFinding, cluster: EventCluster): string {
+  const evidenceHash = crypto
+    .createHash("sha256")
+    .update([
+      finding.clusterId,
+      cluster.provider,
+      cluster.eventId,
+      cluster.levelName,
+      cluster.count,
+      cluster.firstSeen,
+      cluster.lastSeen,
+      cluster.summary,
+      cluster.sampleMessage,
+      finding.explanation,
+      finding.evidence.join("|"),
+    ].join("\n"))
+    .digest("hex")
+    .slice(0, 16);
+  return `fix:${finding.clusterId}:${cluster.provider}:${cluster.eventId}:${evidenceHash}`;
+}
+
 function extractUpdatedAppName(text: string): string {
   const patterns = [
     /\bupdateTitle\s*[:=]\s*['"]?([^'",;\]\r\n]+)/i,
@@ -1791,12 +1861,17 @@ function sanitizeFixResult(result: EventFixResult, provider: string, eventId: nu
       removedUnsafe = true;
       return [];
     }
-    if (!step.command) {
+    const cmd = step.command ? cleanCommand(step.command) : undefined;
+    if (!cmd) {
+      const commandInstruction = step.command ? commandAsInstruction(step.command) : "";
+      const instruction = commandInstruction && !step.instruction.includes(commandInstruction)
+        ? `${step.instruction} ${commandInstruction}`
+        : step.instruction;
       const autoWarning = warningForStep(step);
-      return [{ ...step, warning: step.warning || autoWarning || undefined }];
+      return [{ ...step, instruction, command: undefined as string | undefined, warning: step.warning || autoWarning || undefined }];
     }
-    const autoWarning = isRiskyCmd(step.command) || warningForStep(step);
-    return [{ ...step, warning: step.warning || autoWarning || undefined }];
+    const autoWarning = isRiskyCmd(cmd) || warningForStep({ ...step, command: cmd });
+    return [{ ...step, command: cmd, warning: step.warning || autoWarning || undefined }];
   });
 
   if (removedUnsafe) steps.push(removedUnsafeStep(isDcom));
@@ -1868,12 +1943,15 @@ function sanitizeFixResult(result: EventFixResult, provider: string, eventId: nu
 ipcMain.handle("get-event-fix", async (_event, finding: EventHealthFinding, cluster: EventCluster) => {
   if (!finding || !cluster) return { error: "Invalid input", title: "", rootCauses: [], steps: [], escalation: "" };
 
-  const cacheKey = `fix:${finding.clusterId}`;
+  const cacheKey = buildEventFixCacheKey(finding, cluster);
+  const legacyCacheKey = `fix:${finding.clusterId}`;
   const cache = loadJson(eventFixCachePath) as Record<string, EventFixResult>;
-  if (cache[cacheKey]) {
-    const result = sanitizeFixResult(cache[cacheKey], cluster.provider, cluster.eventId, cluster.sampleMessage);
+  const cached = cache[cacheKey] ?? cache[legacyCacheKey];
+  if (cached) {
+    const result = sanitizeFixResult(cached, cluster.provider, cluster.eventId, cluster.sampleMessage);
     if (JSON.stringify(result) !== JSON.stringify(cache[cacheKey])) {
       cache[cacheKey] = result;
+      if (legacyCacheKey !== cacheKey) delete cache[legacyCacheKey];
       saveJson(eventFixCachePath, cache);
     }
     return result;

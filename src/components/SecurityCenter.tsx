@@ -63,6 +63,56 @@ const EVENT_COLORS: Record<string, { bg: string; color: string; label: string }>
   profile:     { bg: "rgba(20,184,166,0.12)",  color: "#2dd4bf", label: "PROFILE" },
 };
 
+function renderFixPanel(fix: EventFixResult, copiedCmd: string | null, onCopy: (cmd: string) => void) {
+  return (
+    <div className={styles.fixPanel}>
+      <div className={styles.fixTitle}>{fix.title}</div>
+      {fix.rootCauses.length > 0 && (
+        <div className={styles.fixSection}>
+          <div className={styles.fixSectionLabel}>Likely causes</div>
+          <ul className={styles.fixCauseList}>
+            {fix.rootCauses.map((c, i) => <li key={i}>{c}</li>)}
+          </ul>
+        </div>
+      )}
+      {fix.steps.length > 0 && (
+        <div className={styles.fixSection}>
+          <div className={styles.fixSectionLabel}>Fix steps</div>
+          <ol className={styles.fixStepList}>
+            {fix.steps.map((step: EventFixStep, i: number) => (
+              <li key={i} className={`${styles.fixStep}${step.warning ? ` ${styles.fixStepRisky}` : ""}`}>
+                <div className={styles.fixStepHeader}>
+                  <span className={styles.fixStepLabel}>{step.label}</span>
+                </div>
+                <div className={styles.fixStepInstruction}>{step.instruction}</div>
+                {step.command && (
+                  <div className={styles.fixCmdBlock}>
+                    <code className={styles.fixCmd}>{step.command}</code>
+                    <button
+                      type="button"
+                      className={styles.fixCopyBtn}
+                      onClick={() => onCopy(step.command!)}
+                      title="Copy to clipboard"
+                    >
+                      {copiedCmd === step.command ? "Copied!" : "Copy"}
+                    </button>
+                  </div>
+                )}
+                {step.warning && (
+                  <div className={styles.fixStepWarning}>
+                    ⚠ {step.warning}
+                  </div>
+                )}
+              </li>
+            ))}
+          </ol>
+        </div>
+      )}
+      {fix.escalation && <div className={styles.fixEscalation}>{fix.escalation}</div>}
+    </div>
+  );
+}
+
 export default function SecurityCenter({
   rules,
   runningProcesses,
@@ -91,6 +141,8 @@ export default function SecurityCenter({
   const [loadingFixes, setLoadingFixes] = useState<Set<string>>(new Set());
   const [copiedCmd, setCopiedCmd] = useState<string | null>(null);
   const [showResults, setShowResults] = useState(false);
+  const [clusterFindings, setClusterFindings] = useState<Record<string, EventHealthFinding>>({});
+  const [analyzingClusters, setAnalyzingClusters] = useState<Set<string>>(new Set());
 
   const toggleCategory = useCallback((cat: string) => {
     setExpandedCategories(prev => {
@@ -121,6 +173,8 @@ export default function SecurityCenter({
     setImportingEvents(true);
     setEventImportError("");
     setEventAnalysis(null);
+    setClusterFindings({});
+    setFixResults({});
     setExpandedFindings(new Set());
     try {
       const result = await window.electron.importEventLog();
@@ -178,6 +232,107 @@ export default function SecurityCenter({
     setCopiedCmd(cmd);
     setTimeout(() => setCopiedCmd(c => c === cmd ? null : c), 2000);
   }, []);
+
+  const buildClusterFinding = useCallback((cluster: EventCluster): EventHealthFinding => {
+    const isDcom = /distributedcom/i.test(cluster.provider) && (cluster.eventId === 10010 || cluster.eventId === 10016);
+    const isNoise = cluster.category === "likely-noise";
+    const severity: EventHealthFinding["severity"] =
+      isDcom || isNoise ? "info" :
+      cluster.level === 1 ? "critical" :
+      cluster.level === 2 ? "warning" :
+      "info";
+    const confidence: EventHealthFinding["confidence"] =
+      isDcom || isNoise ? "low" :
+      cluster.level === 1 ? "high" :
+      "medium";
+    const key = `${cluster.provider}:${cluster.eventId}`;
+    let safeNextSteps: string[];
+    if (isDcom) {
+      safeNextSteps = [
+        "Ignore unless symptomatic; DistributedCOM 10010/10016 is usually harmless Windows background noise.",
+        "If there are visible symptoms, correlate this timestamp with app crashes, service failures, or user-facing errors.",
+        "Install Windows updates and reboot before considering app-specific repair.",
+      ];
+    } else if (isNoise) {
+      safeNextSteps = ["No repair is needed unless this event lines up with a visible failure or repeated user-facing symptom."];
+    } else if (key.includes("Service Control Manager")) {
+      safeNextSteps = [
+        "Check whether the named service recovered and is currently running.",
+        "Review nearby Application log events for the same timestamp before changing service configuration.",
+      ];
+    } else if (key.includes("WindowsUpdateClient")) {
+      safeNextSteps = [
+        "Close any app named in the event details, then retry the update after a reboot.",
+        "Use Settings > Windows Update or Microsoft Store to retry the update from the GUI.",
+      ];
+    } else if (key.includes("disk:") || key.includes("ntfs:")) {
+      safeNextSteps = [
+        "Back up important data before running disk repair steps.",
+        "Run read-only disk health checks before attempting changes.",
+      ];
+    } else {
+      safeNextSteps = [
+        "Review the full event details and nearby events from the same timestamp.",
+        "Confirm the issue is recurring or user-visible before changing system settings.",
+      ];
+    }
+
+    return {
+      clusterId: cluster.key,
+      severity,
+      confidence,
+      explanation: cluster.summary,
+      evidence: [
+        `Provider: ${cluster.provider}`,
+        `Event ID: ${cluster.eventId}`,
+        `Occurred ${cluster.count} time${cluster.count !== 1 ? "s" : ""}`,
+        ...(cluster.firstSeen ? [`First seen: ${new Date(cluster.firstSeen).toLocaleString()}`] : []),
+        ...(cluster.sampleMessage ? [cluster.sampleMessage.split("\n")[0].slice(0, 120)] : []),
+      ],
+      safeNextSteps,
+      whenToIgnore: isDcom
+        ? "Ignore unless there are correlated app failures, crashes, service startup failures, or user-visible symptoms."
+        : isNoise
+          ? "If no visible application or system problems are present."
+          : "If this is a one-time occurrence with no observable system impact.",
+    };
+  }, []);
+
+  const handleAnalyzeCluster = useCallback(async (cluster: EventCluster) => {
+    if (analyzingClusters.has(cluster.key)) return;
+    const fallbackFinding = buildClusterFinding(cluster);
+    if (!eventReport || !window.electron?.analyzeEventHealth || cluster.category === "likely-noise") {
+      setClusterFindings(prev => ({ ...prev, [cluster.key]: fallbackFinding }));
+      return;
+    }
+
+    setAnalyzingClusters(prev => new Set(prev).add(cluster.key));
+    try {
+      const singleClusterReport: EventHealthReport = {
+        ...eventReport,
+        totalEvents: cluster.count,
+        criticalCount: cluster.level === 1 ? cluster.count : 0,
+        errorCount: cluster.level === 2 ? cluster.count : 0,
+        warningCount: cluster.level === 3 ? cluster.count : 0,
+        overallHealth: cluster.category === "needs-attention" ? (cluster.level === 1 ? "urgent" : "attention") : "watch",
+        clusters: [cluster],
+        fileHash: eventReport.fileHash ? `${eventReport.fileHash}:${cluster.key}` : undefined,
+      };
+      const data = await window.electron.analyzeEventHealth(singleClusterReport, true);
+      const finding = data.findings?.find(f => f.clusterId === cluster.key) ?? fallbackFinding;
+      setClusterFindings(prev => ({ ...prev, [cluster.key]: finding }));
+    } catch {
+      setClusterFindings(prev => ({ ...prev, [cluster.key]: fallbackFinding }));
+    } finally {
+      setAnalyzingClusters(prev => { const n = new Set(prev); n.delete(cluster.key); return n; });
+    }
+  }, [analyzingClusters, buildClusterFinding, eventReport]);
+
+  const handleClusterAdvice = useCallback((cluster: EventCluster) => {
+    const finding = clusterFindings[cluster.key] ?? buildClusterFinding(cluster);
+    setClusterFindings(prev => prev[cluster.key] ? prev : { ...prev, [cluster.key]: finding });
+    handleGetFix(finding, cluster);
+  }, [buildClusterFinding, clusterFindings, handleGetFix]);
 
   const totalRules = Object.keys(rules).filter(name => rules[name].action !== "NONE").length;
   const bannedCount = Object.values(rules).filter(r => r.action === "BAN").length;
@@ -345,6 +500,9 @@ export default function SecurityCenter({
                         {catClusters.map(cluster => {
                           const lc = LEVEL_COLORS[cluster.level] ?? LEVEL_COLORS[4];
                           const isExpanded = expandedClusters.has(cluster.key);
+                          const clusterFinding = clusterFindings[cluster.key];
+                          const isAnalyzingCluster = analyzingClusters.has(cluster.key);
+                          const isActionableCluster = cluster.category !== "likely-noise";
                           return (
                             <div key={cluster.key} className={styles.clusterRow}>
                               <div className={styles.clusterMain}>
@@ -377,6 +535,55 @@ export default function SecurityCenter({
                                   {cluster.sampleMessage && (
                                     <div className={styles.clusterMessage}>{cluster.sampleMessage.slice(0, 300)}</div>
                                   )}
+                                  <div className={styles.findingActions}>
+                                    <button
+                                      type="button"
+                                      className={styles.helpFixBtn}
+                                      disabled={isAnalyzingCluster}
+                                      onClick={() => handleAnalyzeCluster(cluster)}
+                                    >
+                                      {isAnalyzingCluster ? "Analyzing..." : isActionableCluster ? "Analyze this" : "Explain this"}
+                                    </button>
+                                    {isActionableCluster && !fixResults[cluster.key] && !loadingFixes.has(cluster.key) && (
+                                      <button
+                                        type="button"
+                                        className={styles.helpFixBtn}
+                                        onClick={() => handleClusterAdvice(cluster)}
+                                      >
+                                        Help me fix this
+                                      </button>
+                                    )}
+                                    {!isActionableCluster && clusterFinding && !fixResults[cluster.key] && !loadingFixes.has(cluster.key) && (
+                                      <button
+                                        type="button"
+                                        className={styles.secondaryFixBtn}
+                                        onClick={() => handleClusterAdvice(cluster)}
+                                      >
+                                        Help me fix anyway
+                                      </button>
+                                    )}
+                                  </div>
+                                  {clusterFinding && (
+                                    <div className={styles.clusterInsight}>
+                                      <div className={styles.findingDetailTitle}>Cluster analysis</div>
+                                      <div>{clusterFinding.explanation}</div>
+                                      {clusterFinding.whenToIgnore && (
+                                        <div className={styles.findingIgnore}>When to ignore: {clusterFinding.whenToIgnore}</div>
+                                      )}
+                                      {clusterFinding.evidence.length > 0 && (
+                                        <ul className={styles.findingDetailList}>
+                                          {clusterFinding.evidence.map((e, i) => <li key={i}>{e}</li>)}
+                                        </ul>
+                                      )}
+                                    </div>
+                                  )}
+                                  {loadingFixes.has(cluster.key) && (
+                                    <div className={styles.fixLoading}>
+                                      <span className={styles.fixSpinner} />
+                                      Generating advice...
+                                    </div>
+                                  )}
+                                  {fixResults[cluster.key] && renderFixPanel(fixResults[cluster.key], copiedCmd, handleCopyCommand)}
                                 </div>
                               )}
                             </div>
@@ -467,53 +674,7 @@ export default function SecurityCenter({
                                   Generating fix instructions...
                                 </div>
                               )}
-                              {fix && (
-                                <div className={styles.fixPanel}>
-                                  <div className={styles.fixTitle}>{fix.title}</div>
-                                  {fix.rootCauses.length > 0 && (
-                                    <div className={styles.fixSection}>
-                                      <div className={styles.fixSectionLabel}>Likely causes</div>
-                                      <ul className={styles.fixCauseList}>
-                                        {fix.rootCauses.map((c, i) => <li key={i}>{c}</li>)}
-                                      </ul>
-                                    </div>
-                                  )}
-                                  <div className={styles.fixSection}>
-                                    <div className={styles.fixSectionLabel}>Fix steps</div>
-                                    <ol className={styles.fixStepList}>
-                                      {fix.steps.map((step: EventFixStep, i: number) => (
-                                        <li key={i} className={`${styles.fixStep}${step.warning ? ` ${styles.fixStepRisky}` : ""}`}>
-                                          <div className={styles.fixStepHeader}>
-                                            <span className={styles.fixStepLabel}>{step.label}</span>
-                                          </div>
-                                          <div className={styles.fixStepInstruction}>{step.instruction}</div>
-                                          {step.command && (
-                                            <div className={styles.fixCmdBlock}>
-                                              <code className={styles.fixCmd}>{step.command}</code>
-                                              <button
-                                                type="button"
-                                                className={styles.fixCopyBtn}
-                                                onClick={() => handleCopyCommand(step.command!)}
-                                                title="Copy to clipboard"
-                                              >
-                                                {copiedCmd === step.command ? "Copied!" : "Copy"}
-                                              </button>
-                                            </div>
-                                          )}
-                                          {step.warning && (
-                                            <div className={styles.fixStepWarning}>
-                                              ⚠ {step.warning}
-                                            </div>
-                                          )}
-                                        </li>
-                                      ))}
-                                    </ol>
-                                  </div>
-                                  {fix.escalation && (
-                                    <div className={styles.fixEscalation}>{fix.escalation}</div>
-                                  )}
-                                </div>
-                              )}
+                              {fix && renderFixPanel(fix, copiedCmd, handleCopyCommand)}
                             </div>
                           )}
                         </div>

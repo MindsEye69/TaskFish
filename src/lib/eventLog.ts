@@ -214,6 +214,12 @@ export function clusterEvents(entries: EventLogEntry[], fileName: string): Event
   const allTimes = entries.map(e => e.timeCreated).filter(Boolean).sort();
   const dateRange = allTimes.length > 0 ? { from: allTimes[0], to: allTimes[allTimes.length - 1] } : null;
   const clusters: EventCluster[] = [];
+  const hasCorrelatedAppFailure = Array.from(map.values()).some(data =>
+    !/distributedcom/i.test(data.provider) && (
+      (/Application (Error|Hang)|Windows Error Reporting/i.test(data.provider) && [1000, 1001, 1002].includes(data.eventId)) ||
+      (/Service Control Manager/i.test(data.provider) && [7023, 7031, 7034].includes(data.eventId))
+    )
+  );
 
   for (const [key, data] of map) {
     const sortedTimes = data.times.filter(Boolean).sort();
@@ -225,6 +231,11 @@ export function clusterEvents(entries: EventLogEntry[], fileName: string): Event
     else if (level === 2) category = count >= 5 ? "needs-attention" : "watch";
     else if (level === 3) category = count >= 20 ? "watch" : "likely-noise";
     else category = "likely-noise";
+
+    // DCOM 10010/10016 are background noise unless the same import has app/service failures to correlate.
+    if (/distributedcom/i.test(data.provider) && (data.eventId === 10010 || data.eventId === 10016)) {
+      category = hasCorrelatedAppFailure ? "watch" : "likely-noise";
+    }
 
     const lookupKey = `${data.provider}:${data.eventId}`;
     const summary = KNOWN_EVENTS[lookupKey]

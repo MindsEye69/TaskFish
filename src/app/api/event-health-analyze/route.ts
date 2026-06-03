@@ -46,16 +46,25 @@ function buildClusterSummary(clusters: EventCluster[]): string {
 
 function deterministic(report: EventHealthReport): EventHealthAnalysis {
   const findings: EventHealthFinding[] = [];
+  const hasCorrelatedAppFailure = report.clusters.some(c =>
+    !/distributedcom/i.test(c.provider) && (
+      (/Application (Error|Hang)|Windows Error Reporting/i.test(c.provider) && [1000, 1001, 1002].includes(c.eventId)) ||
+      (/Service Control Manager/i.test(c.provider) && [7023, 7031, 7034].includes(c.eventId))
+    )
+  );
 
   for (const cluster of report.clusters) {
     if (cluster.category === "likely-noise") continue;
+    const isDcom = /DistributedCOM/i.test(cluster.provider) && (cluster.eventId === 10010 || cluster.eventId === 10016);
 
     const severity: EventHealthFinding["severity"] =
+      isDcom ? "info" :
       cluster.level === 1 ? "critical" :
       cluster.level === 2 ? (cluster.count >= 5 ? "critical" : "warning") :
       "warning";
 
     const confidence: EventHealthFinding["confidence"] =
+      isDcom ? "low" :
       cluster.level === 1 ? "high" :
       cluster.level === 2 ? "medium" : "low";
 
@@ -104,9 +113,15 @@ function deterministic(report: EventHealthReport): EventHealthAnalysis {
         "Back up important data immediately before further investigation",
       ];
       whenToIgnore = "Disk errors should almost never be ignored; investigate promptly.";
-    } else if (key.includes("DistributedCOM:10016")) {
-      safeNextSteps = ["Usually benign; no action required unless frequency is unusually high."];
-      whenToIgnore = "Very common Windows configuration noise; safe to ignore if the system is otherwise stable.";
+    } else if (isDcom) {
+      safeNextSteps = [
+        "Ignore unless symptomatic; DistributedCOM 10010/10016 is usually harmless Windows background noise.",
+        "If there are visible symptoms, correlate the timestamp with app crashes, service failures, or user-facing errors before changing anything.",
+        "Install Windows updates and reboot before considering app-specific repair.",
+      ];
+      whenToIgnore = hasCorrelatedAppFailure
+        ? "If the correlated app or service failure no longer occurs after update/reboot."
+        : "If the system is otherwise stable with no correlated app failures, crashes, or services failing to start.";
     } else if (key.includes("WindowsUpdateClient")) {
       safeNextSteps = [
         "Run Windows Update manually: Settings > Windows Update > Check for updates",
@@ -227,7 +242,7 @@ Respond with only strict JSON matching this schema:
 Rules:
 - Analyze clusters, not raw events.
 - Only include findings for needs-attention or watch clusters; skip likely-noise entirely.
-- DistributedCOM 10016 is info severity, low confidence, and usually benign Windows noise.
+- DistributedCOM 10010 and 10016 are info severity and low confidence by default. Treat them as likely noise unless correlated crash, service-failure, or user-symptom evidence exists in the clusters; even then, do not make them critical or high confidence by themselves.
 - Kernel-Power 41 and unexpected shutdowns are critical severity, high confidence.
 - disk or ntfs events are critical severity regardless of count.
 - Failed logins 4625: high count is critical; low count is warning.
