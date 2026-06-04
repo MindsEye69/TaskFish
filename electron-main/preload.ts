@@ -13,6 +13,11 @@ contextBridge.exposeInMainWorld("electron", {
   analyzeProcess: (name: string) => ipcRenderer.invoke("analyze-process", name),
   listModels: () => ipcRenderer.invoke("list-models"),
   pullModel: (modelName: string) => ipcRenderer.invoke("pull-model", modelName),
+  onAnalysisStreamChunk: (cb: (chunk: { token: string; done: boolean }) => void) => {
+    const handler = (_: Electron.IpcRendererEvent, data: any) => cb(data);
+    ipcRenderer.on("analysis-stream-chunk", handler);
+    return () => ipcRenderer.removeListener("analysis-stream-chunk", handler);
+  },
   onPullProgress: (cb: (progress: any) => void) => {
     const handler = (_: Electron.IpcRendererEvent, data: any) => cb(data);
     ipcRenderer.on("pull-progress", handler);

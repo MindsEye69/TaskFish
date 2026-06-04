@@ -234,6 +234,60 @@
 @keyframes spin { to { transform: rotate(360deg); } }
 .loadingText { font-size: 13px; color: var(--text-dim); }
 
+/* Streaming terminal */
+.streamTerminal {
+  width: 100%;
+  margin-top: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  border-radius: 8px;
+  overflow: hidden;
+  background: rgba(0, 0, 0, 0.4);
+  max-height: 220px;
+  display: flex;
+  flex-direction: column;
+}
+.streamTerminalBar {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 6px 10px;
+  background: rgba(255, 255, 255, 0.04);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+.streamDot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.15);
+}
+.streamDot:nth-child(1) { background: #ef4444; }
+.streamDot:nth-child(2) { background: #f59e0b; }
+.streamDot:nth-child(3) { background: #22c55e; }
+.streamTerminalLabel {
+  font-size: 10px;
+  color: var(--text-dim);
+  margin-left: 4px;
+  font-family: monospace;
+}
+.streamText {
+  flex: 1;
+  margin: 0;
+  padding: 10px 12px;
+  font-family: "Cascadia Code", "Consolas", monospace;
+  font-size: 10px;
+  color: #a5f3fc;
+  line-height: 1.6;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+.streamCursor {
+  display: inline-block;
+  color: #60a5fa;
+  animation: blink 1s step-end infinite;
+}
+@keyframes blink { 0%, 100% { opacity: 1; } 50% { opacity: 0; } }
+
 /* Rules */
 .rulesList {
   display: flex;

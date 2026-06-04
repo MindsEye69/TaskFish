@@ -105,6 +105,7 @@ export default function AnalysisDrawer({
 }: Props) {
   const [result, setResult]             = useState<AnalysisResult | null>(null);
   const [loading, setLoading]           = useState(false);
+  const [streamText, setStreamText]     = useState("");
   const [isStartupApp, setIsStartupApp] = useState(false);
   const [disablingStartup, setDisablingStartup] = useState(false);
   const [isLocked, setIsLocked]         = useState(!(currentRule?.manualControl ?? false));
@@ -144,10 +145,25 @@ export default function AnalysisDrawer({
       setResult({ error: detail, recommendedModel: DEFAULT_MODEL, _isError: true } as any);
       return;
     }
+
+    setStreamText("");
+
     let res: any;
     try {
       if (window.electron) {
-        res = await window.electron.analyzeProcess(processName);
+        // Subscribe to token stream before firing the IPC call so we don't miss early chunks
+        let unsub: (() => void) | null = null;
+        if (window.electron.onAnalysisStreamChunk) {
+          unsub = window.electron.onAnalysisStreamChunk(({ token, done }) => {
+            if (!done) setStreamText(prev => prev + token);
+          });
+        }
+        try {
+          res = await window.electron.analyzeProcess(processName);
+        } finally {
+          unsub?.();
+          setStreamText(""); // clear typing display once result is in
+        }
       } else {
         const r = await fetch("/api/analyze", {
           method: "POST",
@@ -555,13 +571,26 @@ export default function AnalysisDrawer({
           </button>
         </div>
 
-        {/* Loading */}
+        {/* Loading — streaming terminal */}
         {loading && !errResult && (
           <div className={styles.body}>
             <div className={styles.loading}>
               <div className={styles.spinner} />
-              <span className={styles.loadingText}>Analyzing process…</span>
+              <span className={styles.loadingText}>
+                {streamText ? "Receiving analysis…" : "Analyzing process…"}
+              </span>
             </div>
+            {streamText && (
+              <div className={styles.streamTerminal}>
+                <div className={styles.streamTerminalBar}>
+                  <span className={styles.streamDot} />
+                  <span className={styles.streamDot} />
+                  <span className={styles.streamDot} />
+                  <span className={styles.streamTerminalLabel}>AI output stream</span>
+                </div>
+                <pre className={styles.streamText}>{streamText}<span className={styles.streamCursor}>▋</span></pre>
+              </div>
+            )}
           </div>
         )}
 

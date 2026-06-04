@@ -102,6 +102,7 @@ declare global {
       analyzeProcess: (name: string) => Promise<AnalysisResult & { error?: string; recommendedModel?: string }>;
       listModels: () => Promise<string[]>;
       pullModel: (modelName: string) => Promise<{ ok: boolean; error?: string }>;
+      onAnalysisStreamChunk: (cb: (chunk: { token: string; done: boolean }) => void) => () => void;
       onPullProgress: (cb: (progress: { status?: string; digest?: string; total?: number; completed?: number }) => void) => () => void;
       onAiSetupStatus: (cb: (status: AiSetupStatus) => void) => () => void;
       getAiStatus: () => Promise<AiSetupStatus>;

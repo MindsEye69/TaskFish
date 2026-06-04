@@ -1311,7 +1311,9 @@ suggestedRule.action: "ALLOW" for essential/safe, "LIMITED" for background, "BAN
 riskScore: 0 to 100 representing safety threat level (100 = extreme virus/malware, 0 = completely safe/essential)
 threatFlags: Array of strings representing behavior indicators (e.g. "suspicious_network", "unsigned_binary", "dll_injection", "cryptominer", "keylogger", "adware") if any, otherwise empty array []`;
 
-ipcMain.handle("analyze-process", async (_event, name: string) => {
+const ANALYSIS_IDLE_TIMEOUT_MS = 12000; // abort if no token arrives for 12 s
+
+ipcMain.handle("analyze-process", async (event, name: string) => {
   await ensureDefaultModel();
 
   const model = await getBestModel();
@@ -1324,24 +1326,82 @@ ipcMain.handle("analyze-process", async (_event, name: string) => {
   }
 
   const telemetry = await collectProcessTelemetry(name);
+  const sender = event.sender;
+
+  const sendChunk = (token: string, done: boolean) => {
+    if (!sender.isDestroyed()) sender.send("analysis-stream-chunk", { token, done });
+  };
 
   try {
     const response = await fetch("http://localhost:11434/api/generate", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ model, prompt: ANALYSIS_PROMPT(name, telemetry), stream: false, format: "json" }),
-      signal: AbortSignal.timeout(90000),
+      // stream:true — get tokens as they arrive; format:json kept so model outputs clean JSON
+      body: JSON.stringify({ model, prompt: ANALYSIS_PROMPT(name, telemetry), stream: true, format: "json" }),
     });
-    const data: any = await response.json();
-    if (data.error) return { error: data.error, recommendedModel: RECOMMENDED_MODEL };
+
+    if (!response.ok || !response.body) throw new Error(`Ollama HTTP ${response.status}`);
+
+    const reader = (response.body as any).getReader();
+    const decoder = new TextDecoder();
+    let lineBuf = "";
+    let accumulated = "";
+
+    // Rolling idle timer — resets on every received byte; fires if Ollama goes quiet
+    let idleTimer: ReturnType<typeof setTimeout> | null = null;
+    let idleReject!: (e: Error) => void;
+    const idlePromise = new Promise<never>((_, reject) => { idleReject = reject; });
+    const resetIdle = () => {
+      if (idleTimer) clearTimeout(idleTimer);
+      idleTimer = setTimeout(
+        () => idleReject(new Error(`Ollama idle — no output for ${ANALYSIS_IDLE_TIMEOUT_MS / 1000}s`)),
+        ANALYSIS_IDLE_TIMEOUT_MS,
+      );
+    };
+    resetIdle();
+
+    const readStream = async (): Promise<string> => {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        resetIdle();
+        lineBuf += decoder.decode(value, { stream: true });
+        const lines = lineBuf.split("\n");
+        lineBuf = lines.pop() ?? "";
+        for (const line of lines) {
+          if (!line.trim()) continue;
+          try {
+            const chunk = JSON.parse(line) as { response?: string; done?: boolean; error?: string };
+            if (chunk.error) throw new Error(chunk.error);
+            if (chunk.response) {
+              accumulated += chunk.response;
+              sendChunk(chunk.response, false);
+            }
+            if (chunk.done) {
+              sendChunk("", true);
+              return accumulated;
+            }
+          } catch (parseErr) { /* skip malformed lines */ }
+        }
+      }
+      return accumulated;
+    };
+
+    let finalText: string;
     try {
-      const parsed = JSON.parse(data.response);
-      log(`Analyzed "${name}" with model "${model}": ${parsed.verdict}`);
-      return parsed;
-    } catch {
-      return { error: "Model returned invalid JSON — try re-analyzing" };
+      finalText = await Promise.race([readStream(), idlePromise]);
+    } finally {
+      if (idleTimer) clearTimeout(idleTimer);
+      // Ensure renderer always gets a done signal
+      sendChunk("", true);
     }
+
+    const parsed = JSON.parse(finalText);
+    log(`Analyzed "${name}" with model "${model}" (streamed): ${parsed.verdict}`);
+    return parsed;
+
   } catch (e) {
+    sendChunk("", true); // unblock renderer
     const fallback = offlineAnalysis(name);
     const cache = loadJson(cachePath);
     cache[name.toLowerCase()] = fallback;
