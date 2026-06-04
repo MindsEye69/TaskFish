@@ -64,6 +64,19 @@ const EVENT_COLORS: Record<string, { bg: string; color: string; label: string }>
   profile:     { bg: "rgba(20,184,166,0.12)",  color: "#2dd4bf", label: "PROFILE" },
 };
 
+const COPYABLE_COMMAND_RE = /^(?:[|]\s*)?(Get-|Set-|Start-|Stop-|Restart-|Remove-|New-|Test-|Invoke-|Write-|Select-|Where-|Format-|Out-|sfc\b|dism\b|chkdsk\b|wevtutil\b|sc\s+\w|net\s+\w|reg\s+\w|powercfg\b|netsh\b|winver\b|powershell\b|bcdedit\b|icacls\b|shutdown\b|taskkill\b|tasklist\b|wmic\b|systeminfo\b|ipconfig\b|ping\b|tracert\b|Get-WinEvent\b|msiexec\b)/i;
+const GUI_COMMAND_RE = /\b(open|navigate|go to|click|select(?!-)|settings\s*>|control panel|event viewer|windows update|device manager|task manager|start menu|component services|services\.msc|eventvwr|devmgmt|dcomcnfg|compmgmt\.msc|msconfig|msinfo32|mdsched|regedit|ms-settings:|shell:AppsFolder)\b/i;
+const GUI_LAUNCH_CMD_RE = /\b(Start-Process|Invoke-Item|explorer(?:\.exe)?|cmd\s+\/c\s+start)\b.*\b(ms-settings:|eventvwr|devmgmt|services\.msc|dcomcnfg|compmgmt\.msc|msconfig|msinfo32|mdsched|regedit|control(?:\.exe)?\b|shell:AppsFolder)\b/i;
+const GUI_EXECUTABLE_RE = /^(?:eventvwr(?:\.msc)?|devmgmt(?:\.msc)?|services\.msc|dcomcnfg|compmgmt\.msc|msconfig|msinfo32|mdsched|regedit|control(?:\.exe)?|explorer(?:\.exe)?)(?:\b|$)/i;
+
+function isCopyableCommand(command: string) {
+  return command
+    .split(/\r?\n/)
+    .map(line => line.trim())
+    .filter(Boolean)
+    .every(line => COPYABLE_COMMAND_RE.test(line) && !GUI_COMMAND_RE.test(line) && !GUI_LAUNCH_CMD_RE.test(line) && !GUI_EXECUTABLE_RE.test(line));
+}
+
 function renderFixPanel(fix: EventFixResult, copiedCmd: string | null, onCopy: (cmd: string) => void) {
   return (
     <div className={styles.fixPanel}>
@@ -86,7 +99,7 @@ function renderFixPanel(fix: EventFixResult, copiedCmd: string | null, onCopy: (
                   <span className={styles.fixStepLabel}>{step.label}</span>
                 </div>
                 <div className={styles.fixStepInstruction}>{step.instruction}</div>
-                {step.command && (
+                {step.command && isCopyableCommand(step.command) && (
                   <div className={styles.fixCmdBlock}>
                     <code className={styles.fixCmd}>{step.command}</code>
                     <button
@@ -529,7 +542,12 @@ export default function SecurityCenter({
                           const isActionableCluster = cluster.category !== "likely-noise";
                           return (
                             <div key={cluster.key} className={styles.clusterRow}>
-                              <div className={styles.clusterMain}>
+                              <button
+                                type="button"
+                                className={styles.clusterMain}
+                                onClick={() => toggleCluster(cluster.key)}
+                                aria-expanded={isExpanded}
+                              >
                                 <span className={styles.levelBadge} style={{ background: lc.bg, color: lc.color }}>
                                   {cluster.levelName}
                                 </span>
@@ -538,15 +556,23 @@ export default function SecurityCenter({
                                 </span>
                                 <span className={styles.clusterCount}>&times;{cluster.count}</span>
                                 <span className={styles.clusterSummary}>{cluster.summary}</span>
-                                <button
-                                  type="button"
-                                  className={styles.expandBtn}
-                                  onClick={() => toggleCluster(cluster.key)}
-                                  aria-label={isExpanded ? "Collapse" : "Expand"}
-                                >
-                                  {isExpanded ? "-" : "+"}
-                                </button>
-                              </div>
+                                <span className={styles.expandPill} aria-hidden="true">
+                                  {isExpanded ? "Collapse" : "Expand"}
+                                  <svg
+                                    className={`${styles.expandGlyph}${isExpanded ? ` ${styles.expandGlyphOpen}` : ""}`}
+                                    viewBox="0 0 10 10"
+                                    fill="none"
+                                    stroke="currentColor"
+                                    strokeWidth="2"
+                                    strokeLinecap="round"
+                                    strokeLinejoin="round"
+                                    width="10"
+                                    height="10"
+                                  >
+                                    <path d="M3 2l4 3-4 3" />
+                                  </svg>
+                                </span>
+                              </button>
                               {isExpanded && (
                                 <div className={styles.clusterDetails}>
                                   <div><span className={styles.detailLabel}>Provider:</span> {cluster.provider}</div>

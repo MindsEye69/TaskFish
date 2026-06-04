@@ -722,18 +722,25 @@
   border: 1px solid rgba(255, 255, 255, 0.05);
   border-radius: 8px;
   overflow: hidden;
-  transition: border-color 0.15s;
+  transition: border-color 0.15s, background 0.15s;
 }
 .clusterRow:hover {
-  border-color: rgba(255, 255, 255, 0.1);
+  border-color: rgba(96, 165, 250, 0.28);
+  background: rgba(96, 165, 250, 0.035);
 }
 
 .clusterMain {
+  width: 100%;
   display: flex;
   align-items: center;
   gap: 10px;
   padding: 9px 12px;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
 }
 
 .levelBadge {
@@ -783,6 +790,35 @@
 }
 .expandBtn:hover {
   color: var(--text-muted);
+}
+
+.expandPill {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid rgba(96, 165, 250, 0.24);
+  background: rgba(96, 165, 250, 0.1);
+  color: #93c5fd;
+  border-radius: 999px;
+  padding: 4px 9px;
+  font-size: 10px;
+  font-weight: 800;
+}
+
+.expandGlyph {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  border-radius: 999px;
+  background: rgba(96, 165, 250, 0.18);
+  transition: transform 0.2s ease;
+}
+
+.expandGlyphOpen {
+  transform: rotate(90deg);
 }
 
 .clusterDetails {
