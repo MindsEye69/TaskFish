@@ -62,6 +62,13 @@ export default function Header({
   onApplyProfile,
 }: Props) {
   const [pulse, setPulse] = useState(false);
+  const [appVersion, setAppVersion] = useState("v0.1.8");
+
+  useEffect(() => {
+    window.electron?.getAppVersion?.()
+      .then((v) => setAppVersion(`v${v}`))
+      .catch(() => {});
+  }, []);
 
   useEffect(() => {
     if (lastUpdated) {
@@ -90,7 +97,7 @@ export default function Header({
               />
             </div>
           </div>
-          <span className={styles.version}>v0.1.8</span>
+          <span className={styles.version}>{appVersion}</span>
         </div>
         
         {view !== "map" ? (

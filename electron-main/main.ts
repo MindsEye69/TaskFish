@@ -7,6 +7,15 @@ import { getTrust, getCategory } from "../src/lib/trust";
 import { createProfileId, ensureProfilesData, findProfile, normalizeProfileRules } from "../src/lib/profiles";
 import { parseWevtutilXml, clusterEvents } from "../src/lib/eventLog";
 import type { EventHealthReport, EventHealthAnalysis, EventCluster, EventHealthFinding } from "../src/lib/eventLog";
+import {
+  cleanCommand,
+  commandAsInstruction,
+  FORBIDDEN_FIX_RE,
+  INVALID_CMDLET_RE,
+  isRiskyCmd,
+  removedUnsafeStep,
+  warningForStep,
+} from "./eventFixSafety";
 
 // --- PERSISTENT POWERSHELL SESSION ---
 // One long-lived process handles all queries; eliminates per-poll spawning.
@@ -564,6 +573,18 @@ let enforcementRunning = false;
 let enforcementActive = loadJson(enforcementSettingsPath)?.rulesActive !== false;
 let lastEnforcementActions = 0;
 
+function sendToWebContents(target: WebContents | undefined | null, channel: string, ...args: unknown[]) {
+  if (target && !target.isDestroyed()) {
+    target.send(channel, ...args);
+  }
+}
+
+function sendToMainWindow(channel: string, ...args: unknown[]) {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    sendToWebContents(mainWindow.webContents, channel, ...args);
+  }
+}
+
 function saveEnforcementSettings() {
   saveJson(enforcementSettingsPath, { rulesActive: enforcementActive });
 }
@@ -586,7 +607,25 @@ function showMainWindow() {
 
 function openSecurityCenter() {
   showMainWindow();
-  mainWindow?.webContents.send("open-security-center");
+  sendToMainWindow("open-security-center");
+}
+
+function quitTaskFish() {
+  isQuitting = true;
+  if (enforcementTimer) {
+    clearInterval(enforcementTimer);
+    enforcementTimer = null;
+  }
+  try { tray?.destroy(); } catch (e) { log("Tray destroy failed: " + String(e)); }
+  tray = null;
+  ps.kill();
+  stopOllama();
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.removeAllListeners("close");
+    mainWindow.close();
+  }
+  app.quit();
+  setTimeout(() => app.exit(0), 1200).unref();
 }
 
 function updateTrayMenu() {
@@ -604,10 +643,7 @@ function updateTrayMenu() {
     { type: "separator" },
     {
       label: "Quit TaskFish",
-      click: () => {
-        isQuitting = true;
-        app.quit();
-      },
+      click: quitTaskFish,
     },
   ]));
 }
@@ -648,7 +684,7 @@ async function runBackgroundEnforcement() {
     if (result.actions.length > 0) {
       lastEnforcementActions = result.actions.length;
       updateTrayMenu();
-      mainWindow?.webContents.send("rules-enforced", result.actions);
+      sendToMainWindow("rules-enforced", result.actions);
     }
   } catch (e) {
     log("Background enforcement failed: " + String(e));
@@ -667,6 +703,7 @@ function createTray() {
   if (tray) return;
   tray = new Tray(getTrayIcon());
   tray.on("click", () => showMainWindow());
+  tray.on("right-click", () => tray?.popUpContextMenu());
   updateTrayMenu();
 }
 
@@ -1082,7 +1119,7 @@ let currentAiStatus: { phase: AiSetupPhase; model?: string; error?: string } = {
 
 function broadcastAiStatus(status: typeof currentAiStatus) {
   currentAiStatus = status;
-  mainWindow?.webContents.send("ai-setup-status", status);
+  sendToMainWindow("ai-setup-status", status);
 }
 
 async function getInstalledModels(): Promise<string[]> {
@@ -1132,8 +1169,8 @@ async function pullOllamaModel(modelName: string, sender?: WebContents): Promise
           if (progress.error) {
             pullError = String(progress.error);
           }
-          if (sender && !sender.isDestroyed()) sender.send("pull-progress", progress);
-          else mainWindow?.webContents.send("pull-progress", progress);
+          if (sender && !sender.isDestroyed()) sendToWebContents(sender, "pull-progress", progress);
+          else sendToMainWindow("pull-progress", progress);
         } catch {}
       }
     }
@@ -1142,8 +1179,8 @@ async function pullOllamaModel(modelName: string, sender?: WebContents): Promise
       return { ok: false, error: pullError };
     }
 
-    if (sender && !sender.isDestroyed()) sender.send("pull-progress", { status: "success" });
-    else mainWindow?.webContents.send("pull-progress", { status: "success" });
+    if (sender && !sender.isDestroyed()) sendToWebContents(sender, "pull-progress", { status: "success" });
+    else sendToMainWindow("pull-progress", { status: "success" });
     return { ok: true };
   } catch (e) {
     return { ok: false, error: e instanceof Error ? e.message : String(e) };
@@ -1223,6 +1260,8 @@ async function ensureDefaultModel(sender?: WebContents): Promise<boolean> {
 ipcMain.handle("list-models", async () => getInstalledModels());
 
 ipcMain.handle("get-ai-status", async () => currentAiStatus);
+
+ipcMain.handle("get-app-version", () => app.getVersion());
 
 ipcMain.handle("pull-model", async (event, modelName: string) => {
   const ready = await startOllama();
@@ -1785,52 +1824,6 @@ SAFETY RULES — follow exactly, no exceptions:
 9. Never suggest reinstalling Windows or destructive disk operations without an explicit warning marking them as absolute last resort.`;
 };
 
-const INVALID_CMDLET_RE = /\b(Get-DCOMPermission|Set-DCOMPermission|Get-COMRegistration|Set-ComObjectSecurity|Repair-ComRegistration|Set-DCOMConfig|Get-DCOMConfig|dcomedit|comregedit|Set-DCOMAccessPermission)\b/i;
-const FORBIDDEN_FIX_RE = /\b(dcomcnfg|component services|dcom\s+(appid|app id|acl|permission|permissions)|net\s+localgroup|diskpart|format)\b/i;
-const REGISTRY_FIX_RE = /\b(registry|regedit|HKLM|HKCU|HKEY_LOCAL_MACHINE|HKEY_CURRENT_USER|reg\s+(add|delete)|Set-ItemProperty|Remove-ItemProperty)\b/i;
-const FIREWALL_FIX_RE = /\b(firewall|netsh\s+advfirewall|Set-NetFirewallRule|New-NetFirewallRule)\b/i;
-const DESTRUCTIVE_FIX_RE = /\b(chkdsk\s+.*\/[fr]|delete|remove|reset|reinstall Windows)\b/i;
-
-const REAL_TERMINAL_CMD_RE = /^(?:[|]\s*)?(Get-|Set-|Start-|Stop-|Restart-|Remove-|New-|Test-|Invoke-|Write-|Select-|Where-|Format-|Out-|sfc\b|dism\b|chkdsk\b|wevtutil\b|sc\s+\w|net\s+\w|reg\s+\w|powercfg\b|netsh\b|winver\b|powershell\b|bcdedit\b|icacls\b|shutdown\b|taskkill\b|tasklist\b|wmic\b|systeminfo\b|ipconfig\b|ping\b|tracert\b|Get-WinEvent\b|msiexec\b)/i;
-const GUI_OR_NAV_RE = /\b(open|navigate|go to|click|select|settings\s*>|control panel|event viewer|windows update|device manager|task manager|start menu|component services|services\.msc|eventvwr|devmgmt|msconfig|msinfo32|mdsched|regedit|ms-settings:|shell:AppsFolder)\b/i;
-const GUI_LAUNCH_CMD_RE = /\b(Start-Process|Invoke-Item|explorer(?:\.exe)?|cmd\s+\/c\s+start)\b.*\b(ms-settings:|eventvwr|devmgmt|services\.msc|msconfig|msinfo32|mdsched|regedit|control(?:\.exe)?\b|shell:AppsFolder)\b/i;
-
-function normalizeCommandLine(line: string): string {
-  return line
-    .replace(/[“”„‟]/g, "\"")
-    .replace(/[‘’‚‛]/g, "'")
-    .replace(/^```(?:powershell|ps1|cmd|bat)?/i, "")
-    .replace(/```$/i, "")
-    .replace(/^PS\s+[^>]+>\s*/i, "")
-    .replace(/^[$>]\s*/, "")
-    .replace(/^(?:run|execute|type|command)\s*:?\s+/i, "")
-    .replace(/\s+(?:#|\/\/|::|REM\b).*$/i, "")
-    .trim()
-    .replace(/^["'`]+|["'`]+$/g, "")
-    .split(",")[0]
-    .trim()
-    .replace(/[.;:]+$/g, "");
-}
-
-function cleanCommand(cmd: string): string | undefined {
-  const lines = cmd
-    .split(/\r?\n/)
-    .map(normalizeCommandLine)
-    .filter(line => line && !/^(#|REM\b|::)/i.test(line));
-  if (lines.length === 0) return undefined;
-  if (lines.some(line => GUI_OR_NAV_RE.test(line) || GUI_LAUNCH_CMD_RE.test(line) || !REAL_TERMINAL_CMD_RE.test(line))) return undefined;
-  return lines.join("\n");
-}
-
-function commandAsInstruction(cmd: string): string {
-  return cmd
-    .split(/\r?\n/)
-    .map(normalizeCommandLine)
-    .filter(line => line && (!REAL_TERMINAL_CMD_RE.test(line) || GUI_OR_NAV_RE.test(line) || GUI_LAUNCH_CMD_RE.test(line)))
-    .join(" ")
-    .slice(0, 300);
-}
-
 function buildEventFixCacheKey(finding: EventHealthFinding, cluster: EventCluster): string {
   const evidenceHash = crypto
     .createHash("sha256")
@@ -1870,54 +1863,8 @@ function extractUpdatedAppName(text: string): string {
   return "";
 }
 
-function isRiskyCmd(cmd: string): string {
-  if (/\breg\s+(add|delete)\b/i.test(cmd) || /\b(Set|New|Remove)-ItemProperty\b/i.test(cmd)) {
-    return "Back up the registry first: regedit > File > Export. Incorrect edits can make Windows unbootable.";
-  }
-  if (/\bsc\s+(stop|start)\b/i.test(cmd) || /\bnet\s+(stop|start)\b/i.test(cmd) || /\b(Stop|Start|Restart)-Service\b/i.test(cmd)) {
-    return "Stopping or restarting this service may affect running applications. Reboot if unexpected behavior occurs.";
-  }
-  if (/\bdcomcnfg\b/i.test(cmd)) {
-    return "DCOMCNFG changes can break COM-dependent applications and are rarely needed. This step has been flagged for review.";
-  }
-  if (/\bnetsh\s+advfirewall\b/i.test(cmd) || /\b(Set|New)-NetFirewallRule\b/i.test(cmd)) {
-    return "Firewall changes affect network security. Document the change and verify behavior thoroughly.";
-  }
-  if (/\bchkdsk\b.*\/[fr]\b/i.test(cmd)) {
-    return "chkdsk /f or /r requires a reboot and may take considerable time. Save all work before proceeding.";
-  }
-  return "";
-}
-
-function warningForStep(step: EventFixStep): string {
-  const text = `${step.instruction} ${step.command || ""}`;
-  if (REGISTRY_FIX_RE.test(text)) {
-    return "Back up the registry first: regedit > File > Export. Incorrect edits can make Windows unbootable.";
-  }
-  if (/\b(sc\s+(stop|start)|net\s+(stop|start)|Stop-Service|Start-Service|Restart-Service)\b/i.test(text)) {
-    return "Stopping or restarting this service may affect running applications. Reboot if unexpected behavior occurs.";
-  }
-  if (FIREWALL_FIX_RE.test(text)) {
-    return "Firewall changes affect network security. Document the change and verify behavior thoroughly.";
-  }
-  if (DESTRUCTIVE_FIX_RE.test(text)) {
-    return "This can change or remove system state. Back up important data and use only as a last resort.";
-  }
-  return "";
-}
-
 function hasBugcheckCodeZero(text: string): boolean {
   return /\bBugcheckCode\s*(?:[:=]|\s)\s*(?:0x)?0\b/i.test(text);
-}
-
-function removedUnsafeStep(isDcom: boolean): EventFixStep {
-  return {
-    label: "Unsafe step removed",
-    instruction: isDcom
-      ? "A DCOMCNFG, Component Services, registry permission, or unsupported command suggestion was removed. DistributedCOM 10010/10016 findings should not be repaired with DCOM permission edits unless a documented Microsoft support procedure matches a real symptom."
-      : "An unsupported or unsafe repair suggestion was removed. Use documented vendor or Microsoft guidance before attempting registry, permission, local group, disk partition, or formatting changes.",
-    warning: "Do not run the removed advice without a verified backup, administrator approval, and trusted vendor documentation.",
-  };
 }
 
 function sanitizeFixResult(result: EventFixResult, provider: string, eventId: number, sampleMessage = ""): EventFixResult {

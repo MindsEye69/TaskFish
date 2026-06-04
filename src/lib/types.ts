@@ -127,6 +127,7 @@ declare global {
       importEventLog: () => Promise<{ ok: boolean; canceled?: boolean; error?: string; report?: EventHealthReport }>;
       analyzeEventHealth: (report: EventHealthReport, forceRefresh?: boolean) => Promise<EventHealthAnalysis & { error?: string }>;
       getEventFix: (finding: EventHealthFinding, cluster: EventCluster) => Promise<EventFixResult>;
+      getAppVersion: () => Promise<string>;
     };
   }
 }
