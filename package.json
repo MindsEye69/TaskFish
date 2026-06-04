@@ -1,6 +1,6 @@
 {
   "name": "taskfish",
-  "version": "0.1.0",
+  "version": "0.1.8",
   "description": "TaskFish: Intelligent Process Manager and Game Mode Optimizer",
   "author": "MindsEye",
   "private": true,
@@ -24,6 +24,7 @@
     "win": {
       "target": "nsis",
       "executableName": "TaskFish",
+      "artifactName": "TaskFish Setup ${version}.${ext}",
       "icon": "build/icon.ico",
       "signAndEditExecutable": false
     },
@@ -41,7 +42,10 @@
     "start": "next start",
     "lint": "eslint",
     "electron-dev": "concurrently \"next dev\" \"tsc -p tsconfig.electron.json -w\" \"wait-on http://localhost:3000 && electron .\"",
-    "electron-build": "node scripts/build.js"
+    "electron-build": "node scripts/build.js",
+    "typecheck": "tsc --noEmit",
+    "typecheck:electron": "tsc -p tsconfig.electron.json --noEmit",
+    "test": "npx tsc -p tsconfig.electron.json && node --test tests/*.test.mjs"
   },
   "dependencies": {
     "next": "16.2.4",

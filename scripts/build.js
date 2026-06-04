@@ -11,6 +11,23 @@ const resourcesBinDir = path.join(rootDir, "resources", "bin");
 const ollamaExePath = path.join(resourcesBinDir, "ollama.exe");
 const ollamaZipPath = path.join(resourcesBinDir, "ollama-windows-amd64.zip");
 const ollamaAssetName = "ollama-windows-amd64.zip";
+const buildLogPath = path.join(rootDir, "dist_electron", "taskfish-build.log");
+
+function appendBuildLog(message) {
+  fs.mkdirSync(path.dirname(buildLogPath), { recursive: true });
+  fs.appendFileSync(buildLogPath, `[${new Date().toISOString()}] ${message}\n`);
+}
+
+function runLogged(command, label, options = {}) {
+  console.log(label);
+  appendBuildLog(label);
+  try {
+    execSync(command, { stdio: "inherit", cwd: rootDir, ...options });
+  } catch (err) {
+    appendBuildLog(`${label} failed: ${err && err.message ? err.message : String(err)}`);
+    throw err;
+  }
+}
 
 function downloadFile(url, destination) {
   return new Promise((resolve, reject) => {
@@ -67,6 +84,7 @@ async function ensureOllamaBinary() {
 }
 
 async function main() {
+  appendBuildLog("TaskFish build started.");
   await ensureOllamaBinary();
 
 // 1. Kill any running TaskFish process (Windows only)
@@ -98,15 +116,13 @@ try {
   }
 
   // 4. Run next build
-  console.log("Running Next.js static build...");
-  execSync("npx next build", {
-    stdio: "inherit",
-    cwd: rootDir,
+  runLogged("npx next build", "Running Next.js static build...", {
     env: { ...process.env, TASKFISH_STATIC_EXPORT: "1" },
   });
 
 } catch (err) {
   console.error("Build failed:", err);
+  appendBuildLog(`Build failed: ${err && err.message ? err.message : String(err)}`);
   process.exitCode = 1;
 } finally {
   // 5. Always restore API routes.
@@ -121,13 +137,12 @@ try {
 // 6. If Next.js build succeeded, run tsc and electron-builder
 if (process.exitCode !== 1) {
   try {
-    console.log("Compiling Electron files...");
-    execSync("npx tsc -p tsconfig.electron.json", { stdio: "inherit", cwd: rootDir });
+    runLogged("npx tsc -p tsconfig.electron.json", "Compiling Electron files...");
 
-    console.log("Packaging Electron app...");
-    execSync("npx electron-builder", { stdio: "inherit", cwd: rootDir });
+    runLogged("npx electron-builder", "Packaging Electron app...");
   } catch (err) {
     console.error("Packaging failed:", err);
+    appendBuildLog(`Packaging failed: ${err && err.message ? err.message : String(err)}`);
     process.exitCode = 1;
   }
 }

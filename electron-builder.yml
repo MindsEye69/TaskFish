@@ -1,5 +1,6 @@
 appId: com.mindseye.taskfish
 productName: TaskFish
+artifactName: TaskFish Setup ${version}.${ext}
 directories:
   output: dist_electron
   buildResources: build
