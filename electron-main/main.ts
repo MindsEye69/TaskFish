@@ -754,12 +754,18 @@ function createWindow() {
   }
 }
 
-app.whenReady().then(() => {
-  createTray();
-  createWindow();
-  startBackgroundEnforcement();
-  void ensureDefaultModel();
-});
+const gotLock = app.requestSingleInstanceLock();
+if (!gotLock) {
+  app.quit();
+} else {
+  app.on("second-instance", () => { showMainWindow(); });
+  app.whenReady().then(() => {
+    createTray();
+    createWindow();
+    startBackgroundEnforcement();
+    void ensureDefaultModel();
+  });
+}
 app.on("activate", showMainWindow);
 app.on("window-all-closed", () => {});
 app.on("before-quit", () => {
@@ -1757,6 +1763,11 @@ interface EventFixResult {
 
 const eventFixCachePath = path.join(userDataPath, "event_fix_cache.json");
 
+interface EventFixChatMessage {
+  role: "user" | "assistant";
+  text: string;
+}
+
 const EVENT_FIX_PROMPT = (
   clusterId: string,
   provider: string,
@@ -2002,6 +2013,81 @@ function sanitizeFixResult(result: EventFixResult, provider: string, eventId: nu
   return { ...result, title, steps };
 }
 
+function compactFixForChat(fix: EventFixResult): string {
+  return [
+    `Title: ${fix.title}`,
+    fix.rootCauses.length ? `Likely causes: ${fix.rootCauses.join("; ")}` : "",
+    ...fix.steps.slice(0, 5).map((step, index) => {
+      const pieces = [`${index + 1}. ${step.label}: ${step.instruction}`];
+      if (step.command) pieces.push(`Command: ${step.command}`);
+      if (step.warning) pieces.push(`Warning: ${step.warning}`);
+      return pieces.join(" ");
+    }),
+    fix.escalation ? `Escalation: ${fix.escalation}` : "",
+  ].filter(Boolean).join("\n").slice(0, 3000);
+}
+
+function fallbackFixChatReply(message: string, cluster: EventCluster): string {
+  const shellHint = /\b(get-|set-|select-object|where-object|start-service|stop-service|restart-service)\b/i.test(message)
+    ? "That looks like a PowerShell command. Run it in PowerShell, not Command Prompt. In cmd.exe, PowerShell cmdlets such as Get-Service are reported as unrecognized."
+    : "";
+  const commandFailed = /(not recognized|failed|error|didn't work|did not work|access is denied|permission denied)/i.test(message);
+  const accessHint = /access is denied|permission denied/i.test(message)
+    ? "If the failure says access is denied, reopen the terminal as Administrator before retrying any read or repair step."
+    : "";
+  const observeFirst = `For ${cluster.provider} event ${cluster.eventId}, do not change system settings yet unless this event matches a real symptom you can reproduce.`;
+  const retry = commandFailed
+    ? "Paste the exact command, terminal type, and full error text here. I can then convert it to the right shell or suggest a safer read-only check."
+    : "Tell me what happened after the last step, including any error text. I will adjust the next step instead of repeating the same advice.";
+  return [shellHint, accessHint, observeFirst, retry].filter(Boolean).join("\n\n");
+}
+
+function buildEventFixChatPrompt(
+  finding: EventHealthFinding,
+  cluster: EventCluster,
+  fix: EventFixResult,
+  messages: EventFixChatMessage[],
+): string {
+  const conversation = messages
+    .slice(-8)
+    .map(m => `${m.role === "assistant" ? "Assistant" : "User"}: ${m.text.slice(0, 1000)}`)
+    .join("\n\n");
+  return `You are TaskFish's local Windows Event Health repair assistant.
+
+The user is troubleshooting one Windows Event Log cluster. Be conservative, practical, and interactive.
+
+STRICT RULES:
+- Do not pretend a command worked or exists.
+- If the user reports "not recognized", first check whether they ran a PowerShell command in cmd.exe.
+- Prefer read-only checks and GUI navigation before repair commands.
+- Do not provide copy/paste command blocks unless the command is a real Windows cmd.exe or PowerShell command.
+- If unsure, ask for the exact error text or terminal type instead of inventing a fix.
+- Never suggest DCOMCNFG, Component Services, DCOM ACL/permission changes, diskpart, format, or destructive operations.
+- Keep the answer under 180 words.
+
+EVENT:
+Provider: ${cluster.provider}
+Event ID: ${cluster.eventId}
+Level: ${cluster.levelName}
+Count: ${cluster.count}
+Summary: ${cluster.summary}
+Sample message:
+${cluster.sampleMessage.slice(0, 1200)}
+
+CURRENT ANALYSIS:
+${finding.explanation}
+Evidence:
+${finding.evidence.join("\n")}
+
+CURRENT FIX CARD:
+${compactFixForChat(fix)}
+
+CONVERSATION:
+${conversation}
+
+Reply to the user's latest message with the next safest step.`;
+}
+
 ipcMain.handle("get-event-fix", async (_event, finding: EventHealthFinding, cluster: EventCluster) => {
   if (!finding || !cluster) return { error: "Invalid input", title: "", rootCauses: [], steps: [], escalation: "" };
 
@@ -2097,6 +2183,37 @@ ipcMain.handle("get-event-fix", async (_event, finding: EventHealthFinding, clus
   cache[cacheKey] = result;
   saveJson(eventFixCachePath, cache);
   return result;
+});
+
+ipcMain.handle("chat-event-fix", async (_event, finding: EventHealthFinding, cluster: EventCluster, fix: EventFixResult, messages: EventFixChatMessage[]) => {
+  if (!finding || !cluster || !fix || !Array.isArray(messages)) {
+    return { error: "Invalid input", reply: "I could not read the event context for this follow-up." };
+  }
+  const latest = messages.filter(m => m.role === "user").at(-1)?.text ?? "";
+  const model = await getBestModel();
+  if (!model) {
+    return { reply: fallbackFixChatReply(latest, cluster) };
+  }
+
+  try {
+    const prompt = buildEventFixChatPrompt(finding, cluster, fix, messages);
+    const response = await fetch("http://localhost:11434/api/generate", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model, prompt, stream: false }),
+      signal: AbortSignal.timeout(45000),
+    });
+    const data = await response.json() as { error?: unknown; response?: string };
+    if (!response.ok || data.error || typeof data.response !== "string") {
+      throw new Error(String(data.error || `Ollama HTTP ${response.status}`));
+    }
+    const reply = data.response.trim().slice(0, 1200);
+    return { reply: reply || fallbackFixChatReply(latest, cluster) };
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    if (!msg.includes("ECONNREFUSED") && !msg.includes("connect")) log("chat-event-fix error: " + msg);
+    return { reply: fallbackFixChatReply(latest, cluster), error: msg };
+  }
 });
 
 ipcMain.handle("import-event-log", async () => {

@@ -1,6 +1,6 @@
 "use client";
 import { useState, useMemo, useCallback } from "react";
-import type { AiSetupPhase, ProcessInfo, ProcessProfile, RuleConfig, EventFixResult, EventFixStep } from "@/lib/types";
+import type { AiSetupPhase, ProcessInfo, ProcessProfile, RuleConfig, EventFixResult, EventFixStep, EventFixChatMessage } from "@/lib/types";
 import type { EventHealthReport, EventCluster, EventHealthAnalysis, EventHealthFinding } from "@/lib/eventLog";
 import styles from "./SecurityCenter.module.css";
 
@@ -77,7 +77,17 @@ function isCopyableCommand(command: string) {
     .every(line => COPYABLE_COMMAND_RE.test(line) && !GUI_COMMAND_RE.test(line) && !GUI_LAUNCH_CMD_RE.test(line) && !GUI_EXECUTABLE_RE.test(line));
 }
 
-function renderFixPanel(fix: EventFixResult, copiedCmd: string | null, onCopy: (cmd: string) => void) {
+function renderFixPanel(
+  fix: EventFixResult,
+  chatKey: string,
+  copiedCmd: string | null,
+  onCopy: (cmd: string) => void,
+  chatMessages: EventFixChatMessage[],
+  chatInput: string,
+  chatLoading: boolean,
+  onChatInput: (value: string) => void,
+  onChatSubmit: () => void,
+) {
   return (
     <div className={styles.fixPanel}>
       <div className={styles.fixTitle}>{fix.title}</div>
@@ -123,6 +133,48 @@ function renderFixPanel(fix: EventFixResult, copiedCmd: string | null, onCopy: (
         </div>
       )}
       {fix.escalation && <div className={styles.fixEscalation}>{fix.escalation}</div>}
+      <div className={styles.fixChat}>
+        <div className={styles.fixChatHeader}>
+          <span>Repair assistant</span>
+          <span>Tell it what happened after trying a step.</span>
+        </div>
+        {chatMessages.length > 0 && (
+          <div className={styles.fixChatMessages}>
+            {chatMessages.map((message, index) => (
+              <div
+                key={`${chatKey}-${index}`}
+                className={`${styles.fixChatMessage} ${message.role === "user" ? styles.fixChatUser : styles.fixChatAssistant}`}
+              >
+                <span className={styles.fixChatRole}>{message.role === "user" ? "You" : "TaskFish"}</span>
+                <span>{message.text}</span>
+              </div>
+            ))}
+          </div>
+        )}
+        <div className={styles.fixChatComposer}>
+          <input
+            type="text"
+            value={chatInput}
+            className={styles.fixChatInput}
+            placeholder="Example: That command failed in cmd.exe..."
+            onChange={event => onChatInput(event.target.value)}
+            onKeyDown={event => {
+              if (event.key === "Enter") {
+                event.preventDefault();
+                onChatSubmit();
+              }
+            }}
+          />
+          <button
+            type="button"
+            className={styles.fixChatSend}
+            disabled={chatLoading || chatInput.trim().length === 0}
+            onClick={onChatSubmit}
+          >
+            {chatLoading ? "Thinking..." : "Ask"}
+          </button>
+        </div>
+      </div>
     </div>
   );
 }
@@ -159,6 +211,9 @@ export default function SecurityCenter({
   const [showResults, setShowResults] = useState(false);
   const [clusterFindings, setClusterFindings] = useState<Record<string, EventHealthFinding>>({});
   const [analyzingClusters, setAnalyzingClusters] = useState<Set<string>>(new Set());
+  const [fixChats, setFixChats] = useState<Record<string, EventFixChatMessage[]>>({});
+  const [fixChatInputs, setFixChatInputs] = useState<Record<string, string>>({});
+  const [chattingFixes, setChattingFixes] = useState<Set<string>>(new Set());
 
   const toggleCategory = useCallback((cat: string) => {
     setExpandedCategories(prev => {
@@ -198,6 +253,8 @@ export default function SecurityCenter({
     setEventAnalysis(null);
     setClusterFindings({});
     setFixResults({});
+    setFixChats({});
+    setFixChatInputs({});
     setExpandedFindings(new Set());
     try {
       const result = await window.electron.importEventLog();
@@ -265,6 +322,47 @@ export default function SecurityCenter({
     setCopiedCmd(cmd);
     setTimeout(() => setCopiedCmd(c => c === cmd ? null : c), 2000);
   }, []);
+
+  const handleSendFixChat = useCallback(async (finding: EventHealthFinding, cluster: EventCluster, fix: EventFixResult) => {
+    if (!window.electron?.chatEventFix) return;
+    const key = finding.clusterId;
+    const userText = (fixChatInputs[key] ?? "").trim();
+    if (!userText || chattingFixes.has(key)) return;
+
+    const nextMessages: EventFixChatMessage[] = [
+      ...(fixChats[key] ?? []),
+      { role: "user" as const, text: userText },
+    ].slice(-10);
+
+    setFixChats(prev => ({ ...prev, [key]: nextMessages }));
+    setFixChatInputs(prev => ({ ...prev, [key]: "" }));
+    setChattingFixes(prev => new Set(prev).add(key));
+
+    try {
+      const result = await window.electron.chatEventFix(finding, cluster, fix, nextMessages);
+      const assistantText = result.reply || "I could not generate a follow-up. Paste the exact error text and try again.";
+      setFixChats(prev => ({
+        ...prev,
+        [key]: [...(prev[key] ?? nextMessages), { role: "assistant" as const, text: assistantText }].slice(-10),
+      }));
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      // Only surface to the error band if this is an unexpected failure (not a routine Ollama unavailability).
+      const isConnectionError = /ECONNREFUSED|ECONNRESET|connect|offline/i.test(message);
+      if (!isConnectionError) {
+        recordEventHealthError(message, { phase: "fix-chat", clusterId: key });
+      }
+      setFixChats(prev => ({
+        ...prev,
+        [key]: [
+          ...(prev[key] ?? nextMessages),
+          { role: "assistant" as const, text: "I could not reach the local AI helper. If a PowerShell-style command failed in Command Prompt, try opening PowerShell as Administrator and paste the exact error here." },
+        ].slice(-10),
+      }));
+    } finally {
+      setChattingFixes(prev => { const n = new Set(prev); n.delete(key); return n; });
+    }
+  }, [chattingFixes, fixChatInputs, fixChats, recordEventHealthError]);
 
   const buildClusterFinding = useCallback((cluster: EventCluster): EventHealthFinding => {
     const isDcom = /distributedcom/i.test(cluster.provider) && (cluster.eventId === 10010 || cluster.eventId === 10016);
@@ -633,7 +731,17 @@ export default function SecurityCenter({
                                       Generating advice...
                                     </div>
                                   )}
-                                  {fixResults[cluster.key] && renderFixPanel(fixResults[cluster.key], copiedCmd, handleCopyCommand)}
+                                  {fixResults[cluster.key] && renderFixPanel(
+                                    fixResults[cluster.key],
+                                    cluster.key,
+                                    copiedCmd,
+                                    handleCopyCommand,
+                                    fixChats[cluster.key] ?? [],
+                                    fixChatInputs[cluster.key] ?? "",
+                                    chattingFixes.has(cluster.key),
+                                    value => setFixChatInputs(prev => ({ ...prev, [cluster.key]: value })),
+                                    () => handleSendFixChat(clusterFinding ?? buildClusterFinding(cluster), cluster, fixResults[cluster.key]),
+                                  )}
                                 </div>
                               )}
                             </div>
@@ -724,7 +832,17 @@ export default function SecurityCenter({
                                   Generating fix instructions...
                                 </div>
                               )}
-                              {fix && renderFixPanel(fix, copiedCmd, handleCopyCommand)}
+                              {fix && cluster && renderFixPanel(
+                                fix,
+                                finding.clusterId,
+                                copiedCmd,
+                                handleCopyCommand,
+                                fixChats[finding.clusterId] ?? [],
+                                fixChatInputs[finding.clusterId] ?? "",
+                                chattingFixes.has(finding.clusterId),
+                                value => setFixChatInputs(prev => ({ ...prev, [finding.clusterId]: value })),
+                                () => handleSendFixChat(finding, cluster, fix),
+                              )}
                             </div>
                           )}
                         </div>
