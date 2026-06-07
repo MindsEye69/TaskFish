@@ -353,12 +353,7 @@
   }
 
   .stats {
-    gap: 12px;
-  }
-
-  .stats > :nth-child(2),
-  .stats > :nth-child(3) {
-    display: none;
+    gap: 10px;
   }
 }
 
