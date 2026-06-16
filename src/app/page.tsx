@@ -1,6 +1,6 @@
 "use client";
 import { useCallback, useEffect, useRef, useState, useMemo } from "react";
-import type { AnalysisResult, ProcessInfo, TreeNode, RuleConfig, ProcessProfile, AiSetupPhase } from "@/lib/types";
+import type { AnalysisResult, ProcessInfo, TreeNode, RuleConfig, ProcessProfile, AiSetupPhase, SystemStats } from "@/lib/types";
 import { MANUAL_PROFILE_ID } from "@/lib/profiles";
 import { buildTree, findNode, groupWithHelpers } from "@/lib/processTree";
 import Header from "@/components/Header";
@@ -8,6 +8,7 @@ import ProcessGrid from "@/components/ProcessGrid";
 import MindMap from "@/components/MindMap";
 import AnalysisDrawer from "@/components/AnalysisDrawer";
 import SecurityCenter from "@/components/SecurityCenter";
+import MemoryWatch from "@/components/MemoryWatch";
 
 interface ApiResponse {
   processes: ProcessInfo[];
@@ -19,6 +20,7 @@ interface ApiResponse {
 
 type ProcessHistory = Record<string, { cpu: number; ram: number }[]>;
 type AuditEvent = { id: string; ts: number; type: string; message: string; details?: unknown };
+type MemoryAlertLevel = "ok" | "warn" | "critical";
 
 const DEFAULT_SETTINGS = {
   graphPollMs: 3000,
@@ -80,7 +82,7 @@ export default function Home() {
   const [toastMessage, setToastMessage] = useState<string | null>(null);
 
   
-  const [statsHistory, setStatsHistory] = useState<{ cpu: number, ram: number }[]>([]);
+  const [statsHistory, setStatsHistory] = useState<SystemStats[]>([]);
   const [processHistory, setProcessHistory] = useState<ProcessHistory>({});
   const [auditEvents, setAuditEvents] = useState<AuditEvent[]>([]);
 
@@ -97,6 +99,7 @@ export default function Home() {
   const gameModePidsRef = useRef<Set<number>>(new Set());
   const webLimitedPidsRef = useRef<Set<number>>(new Set());
   const enforcementActionCooldownRef = useRef<Record<string, number>>({});
+  const memoryAlertLevelRef = useRef<MemoryAlertLevel>("ok");
 
   useEffect(() => {
     try {
@@ -525,7 +528,7 @@ export default function Home() {
     if (isStatsFetchingRef.current) return;
     try {
       isStatsFetchingRef.current = true;
-      let data;
+      let data: SystemStats & { error?: string };
       if (window.electron) {
         data = await window.electron.getStats();
       } else {
@@ -533,17 +536,51 @@ export default function Home() {
         data = await res.json();
       }
       if (!data.error) {
+        const sample: SystemStats = {
+          ...data,
+          cpu: Number(data.cpu ?? 0),
+          ram: Number(data.ram ?? 0),
+        };
         setStatsHistory(prev => {
-          const next = [...prev, { cpu: data.cpu, ram: data.ram }];
+          const next = [...prev, sample];
           return next.slice(-20); // Keep last 20 data points
         });
+
+        const commitLimit = Number(sample.commitLimit ?? 0);
+        const commitUsed = Number(sample.commitUsed ?? 0);
+        const commitFree = Number(sample.commitFree ?? Math.max(0, commitLimit - commitUsed));
+        const pressure = Number(sample.commitPressure ?? (commitLimit > 0 ? Math.round((commitUsed / commitLimit) * 100) : 0));
+        const nextLevel: MemoryAlertLevel =
+          pressure >= 92 || (commitLimit > 0 && commitFree <= 2048)
+            ? "critical"
+            : pressure >= 85 || Boolean(sample.pageFileRecommended)
+              ? "warn"
+              : "ok";
+
+        const rank: Record<MemoryAlertLevel, number> = { ok: 0, warn: 1, critical: 2 };
+        const previousLevel = memoryAlertLevelRef.current;
+        if (nextLevel === "ok" && pressure < 78 && commitFree > 4096) {
+          memoryAlertLevelRef.current = "ok";
+        } else if (rank[nextLevel] > rank[previousLevel]) {
+          memoryAlertLevelRef.current = nextLevel;
+          const freeText = commitFree > 0 ? `${(commitFree / 1024).toFixed(1)} GB` : "very little";
+          const title = nextLevel === "critical" ? "TaskFish memory failsafe" : "TaskFish memory warning";
+          const body = nextLevel === "critical"
+            ? `Commit pressure is ${pressure}%. Only ${freeText} virtual memory headroom remains.`
+            : sample.pageFileRecommended
+              ? `Pagefile headroom looks low. Commit pressure is ${pressure}%.`
+              : `Commit pressure is ${pressure}%. ${freeText} virtual memory headroom remains.`;
+          showToast(body);
+          sendNotification(title, body);
+          addAuditEvent("memory", body, sample);
+        }
       }
     } catch (e) {
       // ignore
     } finally {
       isStatsFetchingRef.current = false;
     }
-  }, []);
+  }, [addAuditEvent, sendNotification, showToast]);
 
   useEffect(() => {
     fetchProcesses();
@@ -636,6 +673,14 @@ export default function Home() {
       console.error("Failed to update rule", e);
     }
   }, [fetchRules, addAuditEvent]);
+
+  const acceptProcess = useCallback(async (node: TreeNode) => {
+    await handleRuleChange(node.name, { action: "ALLOW", autoKillMins: null });
+    setSelected(null);
+    setView("list");
+    showToast(`${node.name} accepted`);
+    fetchProcesses();
+  }, [fetchProcesses, handleRuleChange, showToast]);
 
   const [isScanning, setIsScanning] = useState(false);
   const [scanProgress, setScanProgress] = useState({ current: 0, total: 0, name: "" });
@@ -1139,19 +1184,30 @@ export default function Home() {
         )}
 
         {view === "list" ? (
-          <ProcessGrid
-            roots={displayedGroups}
-            rules={rules}
-            processHistory={processHistory}
-            onSelect={(node) => {
-              setSelected(node);
-              setView("map");
-            }}
-            onAnalyze={(node) => openAnalysis(node.name, node.id)}
-            onQuickVerify={(node) => handleRuleChange(node.name, { action: "ALLOW", autoKillMins: null })}
-            aiAvailable={aiAvailable}
-            aiSetupPhase={aiSetupPhase}
-          />
+          <div style={{ height: "100%", display: "flex", flexDirection: "column", overflow: "hidden" }}>
+            <MemoryWatch
+              processes={processes}
+              processHistory={processHistory}
+              onSelect={(proc) => {
+                const node = findNode(roots, proc.id) ?? groups.find(g => normalizeName(g.name) === normalizeName(proc.name));
+                setSelected(node ?? { ...proc, children: [] });
+                setView("map");
+              }}
+            />
+            <ProcessGrid
+              roots={displayedGroups}
+              rules={rules}
+              processHistory={processHistory}
+              onSelect={(node) => {
+                setSelected(node);
+                setView("map");
+              }}
+              onAnalyze={(node) => openAnalysis(node.name, node.id)}
+              onQuickVerify={(node) => handleRuleChange(node.name, { action: "ALLOW", autoKillMins: null })}
+              aiAvailable={aiAvailable}
+              aiSetupPhase={aiSetupPhase}
+            />
+          </div>
         ) : view === "map" ? (
           selected && (
             <MindMap
@@ -1165,6 +1221,7 @@ export default function Home() {
                 fetchProcesses();
               }}
               onAnalyze={(node) => openAnalysis(node.name, node.id)}
+              onAccept={acceptProcess}
               aiAvailable={aiAvailable}
               aiSetupPhase={aiSetupPhase}
             />
@@ -1194,7 +1251,13 @@ export default function Home() {
           processPid={analysisTarget.pid}
           currentRule={rules[normalizeName(analysisTarget.name)] || { action: "NONE", autoKillMins: null }}
           processTrust={processes.find(p => normalizeName(p.name) === normalizeName(analysisTarget.name))?.trust}
-          onRuleChange={handleRuleChange}
+          onRuleChange={async (name, config) => {
+            await handleRuleChange(name, config);
+            setAnalysisTarget(null);
+            setSelected(null);
+            setView("list");
+            fetchProcesses();
+          }}
           onClose={() => setAnalysisTarget(null)}
           auditEvents={auditEvents}
           processHistory={processHistory[normalizeName(analysisTarget.name)] ?? []}

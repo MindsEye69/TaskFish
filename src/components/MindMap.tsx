@@ -10,6 +10,7 @@ interface Props {
   roots: TreeNode[];
   onNavigate: (node: TreeNode) => void;
   onAnalyze: (node: TreeNode) => void;
+  onAccept?: (node: TreeNode) => void;
   onKilled: (ids: number[]) => void;
   aiAvailable?: boolean;
   aiSetupPhase?: AiSetupPhase;
@@ -35,6 +36,7 @@ export default function MindMap({
   roots,
   onNavigate,
   onAnalyze,
+  onAccept,
   onKilled,
   aiAvailable = true,
   aiSetupPhase = "idle",
@@ -114,6 +116,7 @@ export default function MindMap({
 
   const SAFE_SYSTEM = ["system", "lsass", "csrss", "winlogon", "wininit", "services", "smss"];
   const isSafeToKill = !SAFE_SYSTEM.includes(selected.name.toLowerCase());
+  const isAccepted = selected.trust === "trusted" || selected.trust === "verified";
 
   return (
     <div className={styles.wrap} ref={wrapRef}>
@@ -201,6 +204,14 @@ export default function MindMap({
             onClick={() => onAnalyze(selected)}
           >
             {!aiAvailable && aiSetupPhase === "pulling" ? "Setting up" : "Analyze"}
+          </button>
+          <button
+            className={styles.acceptBtn}
+            disabled={isAccepted}
+            title={isAccepted ? "Process is already accepted" : "Accept this process without AI analysis"}
+            onClick={() => onAccept?.(selected)}
+          >
+            {isAccepted ? "Accepted" : "Accept"}
           </button>
           {isSafeToKill && (
             <button

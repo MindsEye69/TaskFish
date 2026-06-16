@@ -15,6 +15,16 @@ export interface EventFixResult {
   error?: string;
 }
 
+export interface EventFixChatMessage {
+  role: "user" | "assistant";
+  text: string;
+}
+
+export interface EventFixChatResponse {
+  reply: string;
+  error?: string;
+}
+
 export type TrustLevel = "trusted" | "verified" | "background" | "unknown";
 export type Category = "system" | "user" | "background" | "unknown";
 export type RuleAction = "ALLOW" | "BAN" | "LIMITED" | "NONE";
@@ -44,6 +54,20 @@ export interface ProcessInfo {
   category: Category;
   vendor?: string; // cleaned company name from digital signature (populated async by verifier)
   execPath?: string;
+}
+
+export interface SystemStats {
+  cpu: number;
+  ram: number;
+  totalRam?: number;
+  freeRam?: number;
+  commitUsed?: number;
+  commitLimit?: number;
+  commitFree?: number;
+  commitPressure?: number;
+  pageFileUsed?: number;
+  pageFileAllocated?: number;
+  pageFileRecommended?: boolean;
 }
 
 export interface ProcessGroup {
@@ -120,13 +144,14 @@ declare global {
       getAuditLog: () => Promise<{ id: string; ts: number; type: string; message: string; details?: any }[]>;
       appendAudit: (type: string, message: string, details?: unknown) => Promise<void>;
       notify: (title: string, body: string) => Promise<void>;
-      getStats: () => Promise<{ cpu: number, ram: number }>;
+      getStats: () => Promise<SystemStats>;
       getProcessDlls: (pid: number) => Promise<any[]>;
       getProcessNetwork: (pid: number) => Promise<{ tcp: any[], udp: any[] }>;
       getProcessServices: (pid: number) => Promise<any[]>;
       importEventLog: () => Promise<{ ok: boolean; canceled?: boolean; error?: string; report?: EventHealthReport }>;
       analyzeEventHealth: (report: EventHealthReport, forceRefresh?: boolean) => Promise<EventHealthAnalysis & { error?: string }>;
       getEventFix: (finding: EventHealthFinding, cluster: EventCluster) => Promise<EventFixResult>;
+      chatEventFix: (finding: EventHealthFinding, cluster: EventCluster, fix: EventFixResult, messages: EventFixChatMessage[]) => Promise<EventFixChatResponse>;
       getAppVersion: () => Promise<string>;
     };
   }

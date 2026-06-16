@@ -16,6 +16,10 @@ import {
   removedUnsafeStep,
   warningForStep,
 } from "./eventFixSafety";
+import {
+  buildPrivacySafeProcessTelemetry,
+  escapeCimFilterLiteral,
+} from "./processPrivacy";
 
 // --- PERSISTENT POWERSHELL SESSION ---
 // One long-lived process handles all queries; eliminates per-poll spawning.
@@ -718,6 +722,8 @@ function createWindow() {
   log("Creating window...");
   mainWindow = new BrowserWindow({
     width: 1400, height: 900,
+    minWidth: 1180,
+    minHeight: 720,
     backgroundColor: "#191926",
     titleBarStyle: "hidden",
     titleBarOverlay: { color: "#191926", symbolColor: "#f0f0f8", height: 40 },
@@ -749,17 +755,22 @@ function createWindow() {
     mainWindow.webContents.openDevTools();
     mainWindow.loadURL("http://localhost:3000");
   } else {
-    mainWindow.webContents.openDevTools(); // temporary debug
     mainWindow.loadFile(path.join(__dirname, "../../out/index.html"));
   }
 }
 
-app.whenReady().then(() => {
-  createTray();
-  createWindow();
-  startBackgroundEnforcement();
-  void ensureDefaultModel();
-});
+const gotLock = app.requestSingleInstanceLock();
+if (!gotLock) {
+  app.quit();
+} else {
+  app.on("second-instance", () => { showMainWindow(); });
+  app.whenReady().then(() => {
+    createTray();
+    createWindow();
+    startBackgroundEnforcement();
+    void ensureDefaultModel();
+  });
+}
 app.on("activate", showMainWindow);
 app.on("window-all-closed", () => {});
 app.on("before-quit", () => {
@@ -1272,7 +1283,9 @@ ipcMain.handle("pull-model", async (event, modelName: string) => {
 async function collectProcessTelemetry(name: string): Promise<string> {
   try {
     const cleanName = name.replace(/\.exe$/i, "");
-    const procInfoQuery = `Get-CimInstance Win32_Process -Filter "Name='${name}' or Name='${cleanName}.exe'" | Select-Object ProcessId,ParentProcessId,CommandLine,ExecutablePath | ConvertTo-Json -Compress`;
+    const filterName = escapeCimFilterLiteral(name);
+    const filterCleanName = escapeCimFilterLiteral(`${cleanName}.exe`);
+    const procInfoQuery = `Get-CimInstance Win32_Process -Filter "Name='${filterName}' or Name='${filterCleanName}'" | Select-Object ProcessId,ParentProcessId,CommandLine,ExecutablePath | ConvertTo-Json -Compress`;
     const procStdout = await ps.run(procInfoQuery, 8000).catch(() => "");
     if (!procStdout.trim()) return "";
     const parsedProc = JSON.parse(procStdout.trim());
@@ -1293,7 +1306,12 @@ async function collectProcessTelemetry(name: string): Promise<string> {
       } catch (_) {}
     }
 
-    let fileMetadata = "";
+    let fileMetadata: {
+      fileDescription?: string;
+      companyName?: string;
+      signatureStatus?: string;
+      signerSubject?: string;
+    } = {};
     if (execPath && fs.existsSync(execPath)) {
       try {
         const escapedPath = execPath.replace(/'/g, "''");
@@ -1302,30 +1320,50 @@ async function collectProcessTelemetry(name: string): Promise<string> {
         if (metaStdout && metaStdout.trim()) {
           const m = JSON.parse(metaStdout.trim());
           const cleanSigner = m.Signer ? m.Signer.split(",")[0].replace("CN=", "") : "Unsigned";
-          fileMetadata = `File Description: ${m.Description || "Unknown"}\nCompany Name: ${m.Company || "Unknown"}\nDigital Signature Status: ${m.SigStatus || "Unsigned"}\nSigner Subject: ${cleanSigner}`;
+          fileMetadata = {
+            fileDescription: m.Description || "Unknown",
+            companyName: m.Company || "Unknown",
+            signatureStatus: m.SigStatus || "Unsigned",
+            signerSubject: cleanSigner,
+          };
         }
       } catch (_) {}
     }
 
     const dllsQuery  = `Get-Process -Id ${pid} -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Modules | Select-Object -First 25 ModuleName | ConvertTo-Json -Compress`;
     const dllsStdout = await ps.run(dllsQuery).catch(() => "");
-    let dllList = "None";
+    let dllList: string[] = [];
     if (dllsStdout && dllsStdout.trim()) {
       const parsedDlls = JSON.parse(dllsStdout.trim());
       const dllArr = Array.isArray(parsedDlls) ? parsedDlls : [parsedDlls];
-      dllList = dllArr.map((m: any) => m.ModuleName).join(", ");
+      dllList = dllArr.map((m: any) => m.ModuleName).filter(Boolean);
     }
 
     const netQuery  = `Get-NetTCPConnection -OwningProcess ${pid} -ErrorAction SilentlyContinue | Select-Object RemoteAddress,RemotePort,State | ConvertTo-Json -Compress`;
     const netStdout = await ps.run(netQuery).catch(() => "");
-    let netList = "None";
+    let netList: Array<{ RemoteAddress?: string; RemotePort?: number | string; State?: string }> = [];
     if (netStdout && netStdout.trim()) {
       const parsedNet = JSON.parse(netStdout.trim());
       const netArr = Array.isArray(parsedNet) ? parsedNet : [parsedNet];
-      netList = netArr.map((c: any) => `${c.RemoteAddress}:${c.RemotePort} (${c.State})`).join(", ");
+      netList = netArr.map((c: any) => ({
+        RemoteAddress: c.RemoteAddress,
+        RemotePort: c.RemotePort,
+        State: c.State,
+      }));
     }
 
-    return `Executable Path: ${execPath || "Unknown"}\nParent Process: ${parentName} (PID: ${ppid || "Unknown"})\nCommand Line: ${cmdLine}\n${fileMetadata ? fileMetadata + "\n" : ""}Loaded DLLs: ${dllList}\nNetwork Connections: ${netList}`;
+    return buildPrivacySafeProcessTelemetry({
+      executablePath: execPath,
+      parentName,
+      parentPid: ppid,
+      commandLine: cmdLine,
+      fileDescription: fileMetadata.fileDescription,
+      companyName: fileMetadata.companyName,
+      signatureStatus: fileMetadata.signatureStatus,
+      signerSubject: fileMetadata.signerSubject,
+      dllNames: dllList,
+      tcpConnections: netList,
+    });
   } catch {
     return "";
   }
@@ -1486,15 +1524,36 @@ ipcMain.handle("get-process-services", async (_event, pid: number) => {
   }
 });
 
-ipcMain.handle("get-stats", async () => {
-  try {
-    const stdout = await ps.run(
-      `$cpu = Get-CimInstance Win32_PerfFormattedData_PerfOS_Processor -Filter "Name='_Total'" | Select-Object -ExpandProperty PercentProcessorTime; $mem = Get-CimInstance Win32_OperatingSystem; $used = $mem.TotalVisibleMemorySize - $mem.FreePhysicalMemory; @{ cpu = [int]$cpu; ram = [int]($used / 1024) } | ConvertTo-Json -Compress`
+ipcMain.handle("get-stats", () => {
+  // Dedicated one-shot process — bypasses the shared PS queue so stats polling
+  // can't be starved by long-running commands (deep scan, verification, etc.).
+  const script = [
+    `$cpu = (Get-CimInstance Win32_PerfFormattedData_PerfOS_Processor -Filter "Name='_Total'").PercentProcessorTime`,
+    `$m = Get-CimInstance Win32_OperatingSystem`,
+    `$pf = @(Get-CimInstance Win32_PageFileUsage -ErrorAction SilentlyContinue)`,
+    `$pageAllocated = [int](($pf | Measure-Object -Property AllocatedBaseSize -Sum).Sum)`,
+    `$pageUsed = [int](($pf | Measure-Object -Property CurrentUsage -Sum).Sum)`,
+    `$totalRam = [int]($m.TotalVisibleMemorySize / 1024)`,
+    `$freeRam = [int]($m.FreePhysicalMemory / 1024)`,
+    `$commitLimit = [int]($m.TotalVirtualMemorySize / 1024)`,
+    `$commitFree = [int]($m.FreeVirtualMemory / 1024)`,
+    `$commitUsed = [Math]::Max(0, $commitLimit - $commitFree)`,
+    `$pressure = if ($commitLimit -gt 0) { [int][Math]::Round(($commitUsed / $commitLimit) * 100) } else { 0 }`,
+    `$needsPageFile = ($pageAllocated -lt 1024) -or (($commitLimit - $totalRam) -lt 2048) -or (($pressure -ge 85) -and (($pageAllocated - $pageUsed) -lt 4096))`,
+    `@{cpu=[int]$cpu; ram=($totalRam - $freeRam); totalRam=$totalRam; freeRam=$freeRam; commitUsed=$commitUsed; commitLimit=$commitLimit; commitFree=$commitFree; commitPressure=$pressure; pageFileUsed=$pageUsed; pageFileAllocated=$pageAllocated; pageFileRecommended=$needsPageFile} | ConvertTo-Json -Compress`,
+  ].join("; ");
+  return new Promise<{ cpu: number; ram: number }>((resolve) => {
+    execFile(
+      "powershell.exe",
+      ["-NoProfile", "-NonInteractive", "-Command", script],
+      { timeout: 8000, windowsHide: true, encoding: "utf8" } as Parameters<typeof execFile>[2],
+      (err, stdout) => {
+        if (err) { resolve({ cpu: 0, ram: 0 }); return; }
+        try { resolve(JSON.parse((stdout as string).trim())); }
+        catch { resolve({ cpu: 0, ram: 0 }); }
+      }
     );
-    return JSON.parse(stdout);
-  } catch (e) {
-    return { cpu: 0, ram: 0 };
-  }
+  });
 });
 
 // --- EVENT HEALTH ANALYSIS ---
@@ -1757,6 +1816,11 @@ interface EventFixResult {
 
 const eventFixCachePath = path.join(userDataPath, "event_fix_cache.json");
 
+interface EventFixChatMessage {
+  role: "user" | "assistant";
+  text: string;
+}
+
 const EVENT_FIX_PROMPT = (
   clusterId: string,
   provider: string,
@@ -2002,6 +2066,81 @@ function sanitizeFixResult(result: EventFixResult, provider: string, eventId: nu
   return { ...result, title, steps };
 }
 
+function compactFixForChat(fix: EventFixResult): string {
+  return [
+    `Title: ${fix.title}`,
+    fix.rootCauses.length ? `Likely causes: ${fix.rootCauses.join("; ")}` : "",
+    ...fix.steps.slice(0, 5).map((step, index) => {
+      const pieces = [`${index + 1}. ${step.label}: ${step.instruction}`];
+      if (step.command) pieces.push(`Command: ${step.command}`);
+      if (step.warning) pieces.push(`Warning: ${step.warning}`);
+      return pieces.join(" ");
+    }),
+    fix.escalation ? `Escalation: ${fix.escalation}` : "",
+  ].filter(Boolean).join("\n").slice(0, 3000);
+}
+
+function fallbackFixChatReply(message: string, cluster: EventCluster): string {
+  const shellHint = /\b(get-|set-|select-object|where-object|start-service|stop-service|restart-service)\b/i.test(message)
+    ? "That looks like a PowerShell command. Run it in PowerShell, not Command Prompt. In cmd.exe, PowerShell cmdlets such as Get-Service are reported as unrecognized."
+    : "";
+  const commandFailed = /(not recognized|failed|error|didn't work|did not work|access is denied|permission denied)/i.test(message);
+  const accessHint = /access is denied|permission denied/i.test(message)
+    ? "If the failure says access is denied, reopen the terminal as Administrator before retrying any read or repair step."
+    : "";
+  const observeFirst = `For ${cluster.provider} event ${cluster.eventId}, do not change system settings yet unless this event matches a real symptom you can reproduce.`;
+  const retry = commandFailed
+    ? "Paste the exact command, terminal type, and full error text here. I can then convert it to the right shell or suggest a safer read-only check."
+    : "Tell me what happened after the last step, including any error text. I will adjust the next step instead of repeating the same advice.";
+  return [shellHint, accessHint, observeFirst, retry].filter(Boolean).join("\n\n");
+}
+
+function buildEventFixChatPrompt(
+  finding: EventHealthFinding,
+  cluster: EventCluster,
+  fix: EventFixResult,
+  messages: EventFixChatMessage[],
+): string {
+  const conversation = messages
+    .slice(-8)
+    .map(m => `${m.role === "assistant" ? "Assistant" : "User"}: ${m.text.slice(0, 1000)}`)
+    .join("\n\n");
+  return `You are TaskFish's local Windows Event Health repair assistant.
+
+The user is troubleshooting one Windows Event Log cluster. Be conservative, practical, and interactive.
+
+STRICT RULES:
+- Do not pretend a command worked or exists.
+- If the user reports "not recognized", first check whether they ran a PowerShell command in cmd.exe.
+- Prefer read-only checks and GUI navigation before repair commands.
+- Do not provide copy/paste command blocks unless the command is a real Windows cmd.exe or PowerShell command.
+- If unsure, ask for the exact error text or terminal type instead of inventing a fix.
+- Never suggest DCOMCNFG, Component Services, DCOM ACL/permission changes, diskpart, format, or destructive operations.
+- Keep the answer under 180 words.
+
+EVENT:
+Provider: ${cluster.provider}
+Event ID: ${cluster.eventId}
+Level: ${cluster.levelName}
+Count: ${cluster.count}
+Summary: ${cluster.summary}
+Sample message:
+${cluster.sampleMessage.slice(0, 1200)}
+
+CURRENT ANALYSIS:
+${finding.explanation}
+Evidence:
+${finding.evidence.join("\n")}
+
+CURRENT FIX CARD:
+${compactFixForChat(fix)}
+
+CONVERSATION:
+${conversation}
+
+Reply to the user's latest message with the next safest step.`;
+}
+
 ipcMain.handle("get-event-fix", async (_event, finding: EventHealthFinding, cluster: EventCluster) => {
   if (!finding || !cluster) return { error: "Invalid input", title: "", rootCauses: [], steps: [], escalation: "" };
 
@@ -2097,6 +2236,37 @@ ipcMain.handle("get-event-fix", async (_event, finding: EventHealthFinding, clus
   cache[cacheKey] = result;
   saveJson(eventFixCachePath, cache);
   return result;
+});
+
+ipcMain.handle("chat-event-fix", async (_event, finding: EventHealthFinding, cluster: EventCluster, fix: EventFixResult, messages: EventFixChatMessage[]) => {
+  if (!finding || !cluster || !fix || !Array.isArray(messages)) {
+    return { error: "Invalid input", reply: "I could not read the event context for this follow-up." };
+  }
+  const latest = messages.filter(m => m.role === "user").at(-1)?.text ?? "";
+  const model = await getBestModel();
+  if (!model) {
+    return { reply: fallbackFixChatReply(latest, cluster) };
+  }
+
+  try {
+    const prompt = buildEventFixChatPrompt(finding, cluster, fix, messages);
+    const response = await fetch("http://localhost:11434/api/generate", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model, prompt, stream: false }),
+      signal: AbortSignal.timeout(45000),
+    });
+    const data = await response.json() as { error?: unknown; response?: string };
+    if (!response.ok || data.error || typeof data.response !== "string") {
+      throw new Error(String(data.error || `Ollama HTTP ${response.status}`));
+    }
+    const reply = data.response.trim().slice(0, 1200);
+    return { reply: reply || fallbackFixChatReply(latest, cluster) };
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    if (!msg.includes("ECONNREFUSED") && !msg.includes("connect")) log("chat-event-fix error: " + msg);
+    return { reply: fallbackFixChatReply(latest, cluster), error: msg };
+  }
 });
 
 ipcMain.handle("import-event-log", async () => {

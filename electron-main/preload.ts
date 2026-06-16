@@ -54,5 +54,6 @@ contextBridge.exposeInMainWorld("electron", {
   importEventLog: () => ipcRenderer.invoke("import-event-log"),
   analyzeEventHealth: (report: any, forceRefresh?: boolean) => ipcRenderer.invoke("analyze-event-health", report, forceRefresh),
   getEventFix: (finding: any, cluster: any) => ipcRenderer.invoke("get-event-fix", finding, cluster),
+  chatEventFix: (finding: any, cluster: any, fix: any, messages: any[]) => ipcRenderer.invoke("chat-event-fix", finding, cluster, fix, messages),
   getAppVersion: () => ipcRenderer.invoke("get-app-version"),
 });

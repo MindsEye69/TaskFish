@@ -124,6 +124,25 @@
 }
 .analyzeBtn:hover { background: rgba(255,255,255,0.15); }
 
+.acceptBtn {
+  padding: 7px 16px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 700;
+  background: rgba(34,197,94,0.12);
+  color: var(--verified);
+  border: 1.5px solid rgba(34,197,94,0.32);
+  transition: all 0.15s ease;
+}
+.acceptBtn:hover:not(:disabled) {
+  background: rgba(34,197,94,0.22);
+  box-shadow: 0 0 16px rgba(34,197,94,0.16);
+}
+.acceptBtn:disabled {
+  opacity: 0.48;
+  cursor: not-allowed;
+}
+
 .killBtn {
   padding: 7px 16px;
   border-radius: 999px;
