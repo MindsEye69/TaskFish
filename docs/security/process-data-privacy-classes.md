@@ -93,6 +93,12 @@ Before adding or changing a telemetry or AI feature:
 4. Include runtime/cache location in the local inference matrix if the feature sends data to a model runtime.
 5. Add a test fixture for at least one user-private path, one command line with a fake secret, and one remote endpoint.
 
+## Implementation Status
+
+- 2026-06-16: Added `electron-main/processPrivacy.ts` and routed Electron process-analysis prompt telemetry through it.
+- The helper redacts user-private paths, withholds command lines, detects secret-like command strings, and summarizes remote endpoints by address class.
+- Tests cover a user-private path, a command line with a fake secret, remote endpoint summarization, and CIM filter literal escaping.
+
 ## Open Follow-Up
 
-The current app already exposes module paths and network endpoints in detail views. The next implementation step should add a shared redaction helper before expanding exports, prompt content, or persistent evidence snapshots.
+Before adding exports, persistent evidence snapshots, or additional runtime providers, reuse the shared privacy helper and add provider-level tests that prove redaction runs before `analyzeProcess`.

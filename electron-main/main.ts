@@ -16,6 +16,10 @@ import {
   removedUnsafeStep,
   warningForStep,
 } from "./eventFixSafety";
+import {
+  buildPrivacySafeProcessTelemetry,
+  escapeCimFilterLiteral,
+} from "./processPrivacy";
 
 // --- PERSISTENT POWERSHELL SESSION ---
 // One long-lived process handles all queries; eliminates per-poll spawning.
@@ -1279,7 +1283,9 @@ ipcMain.handle("pull-model", async (event, modelName: string) => {
 async function collectProcessTelemetry(name: string): Promise<string> {
   try {
     const cleanName = name.replace(/\.exe$/i, "");
-    const procInfoQuery = `Get-CimInstance Win32_Process -Filter "Name='${name}' or Name='${cleanName}.exe'" | Select-Object ProcessId,ParentProcessId,CommandLine,ExecutablePath | ConvertTo-Json -Compress`;
+    const filterName = escapeCimFilterLiteral(name);
+    const filterCleanName = escapeCimFilterLiteral(`${cleanName}.exe`);
+    const procInfoQuery = `Get-CimInstance Win32_Process -Filter "Name='${filterName}' or Name='${filterCleanName}'" | Select-Object ProcessId,ParentProcessId,CommandLine,ExecutablePath | ConvertTo-Json -Compress`;
     const procStdout = await ps.run(procInfoQuery, 8000).catch(() => "");
     if (!procStdout.trim()) return "";
     const parsedProc = JSON.parse(procStdout.trim());
@@ -1300,7 +1306,12 @@ async function collectProcessTelemetry(name: string): Promise<string> {
       } catch (_) {}
     }
 
-    let fileMetadata = "";
+    let fileMetadata: {
+      fileDescription?: string;
+      companyName?: string;
+      signatureStatus?: string;
+      signerSubject?: string;
+    } = {};
     if (execPath && fs.existsSync(execPath)) {
       try {
         const escapedPath = execPath.replace(/'/g, "''");
@@ -1309,30 +1320,50 @@ async function collectProcessTelemetry(name: string): Promise<string> {
         if (metaStdout && metaStdout.trim()) {
           const m = JSON.parse(metaStdout.trim());
           const cleanSigner = m.Signer ? m.Signer.split(",")[0].replace("CN=", "") : "Unsigned";
-          fileMetadata = `File Description: ${m.Description || "Unknown"}\nCompany Name: ${m.Company || "Unknown"}\nDigital Signature Status: ${m.SigStatus || "Unsigned"}\nSigner Subject: ${cleanSigner}`;
+          fileMetadata = {
+            fileDescription: m.Description || "Unknown",
+            companyName: m.Company || "Unknown",
+            signatureStatus: m.SigStatus || "Unsigned",
+            signerSubject: cleanSigner,
+          };
         }
       } catch (_) {}
     }
 
     const dllsQuery  = `Get-Process -Id ${pid} -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Modules | Select-Object -First 25 ModuleName | ConvertTo-Json -Compress`;
     const dllsStdout = await ps.run(dllsQuery).catch(() => "");
-    let dllList = "None";
+    let dllList: string[] = [];
     if (dllsStdout && dllsStdout.trim()) {
       const parsedDlls = JSON.parse(dllsStdout.trim());
       const dllArr = Array.isArray(parsedDlls) ? parsedDlls : [parsedDlls];
-      dllList = dllArr.map((m: any) => m.ModuleName).join(", ");
+      dllList = dllArr.map((m: any) => m.ModuleName).filter(Boolean);
     }
 
     const netQuery  = `Get-NetTCPConnection -OwningProcess ${pid} -ErrorAction SilentlyContinue | Select-Object RemoteAddress,RemotePort,State | ConvertTo-Json -Compress`;
     const netStdout = await ps.run(netQuery).catch(() => "");
-    let netList = "None";
+    let netList: Array<{ RemoteAddress?: string; RemotePort?: number | string; State?: string }> = [];
     if (netStdout && netStdout.trim()) {
       const parsedNet = JSON.parse(netStdout.trim());
       const netArr = Array.isArray(parsedNet) ? parsedNet : [parsedNet];
-      netList = netArr.map((c: any) => `${c.RemoteAddress}:${c.RemotePort} (${c.State})`).join(", ");
+      netList = netArr.map((c: any) => ({
+        RemoteAddress: c.RemoteAddress,
+        RemotePort: c.RemotePort,
+        State: c.State,
+      }));
     }
 
-    return `Executable Path: ${execPath || "Unknown"}\nParent Process: ${parentName} (PID: ${ppid || "Unknown"})\nCommand Line: ${cmdLine}\n${fileMetadata ? fileMetadata + "\n" : ""}Loaded DLLs: ${dllList}\nNetwork Connections: ${netList}`;
+    return buildPrivacySafeProcessTelemetry({
+      executablePath: execPath,
+      parentName,
+      parentPid: ppid,
+      commandLine: cmdLine,
+      fileDescription: fileMetadata.fileDescription,
+      companyName: fileMetadata.companyName,
+      signatureStatus: fileMetadata.signatureStatus,
+      signerSubject: fileMetadata.signerSubject,
+      dllNames: dllList,
+      tcpConnections: netList,
+    });
   } catch {
     return "";
   }

@@ -90,6 +90,12 @@ Keep Ollama as the default runtime for the current Electron app because it is al
 
 Then run a Foundry Local spike behind the same provider interface. Windows AI APIs should remain a feature-specific path, not a replacement for the general process-analysis LLM, until Electron/native bridging and hardware availability are proven.
 
+## Current Implementation Status
+
+- 2026-06-16: Electron process-analysis prompt telemetry now passes through `electron-main/processPrivacy.ts`.
+- The current boundary is a privacy-safe telemetry builder, not a full runtime-provider abstraction.
+- The full provider interface should be added before Foundry Local, Windows AI API, or additional model runtime integration.
+
 ## Open Verification Items
 
 - Confirm the exact Foundry Local model cache path and diagnostics/log files on a test machine.
