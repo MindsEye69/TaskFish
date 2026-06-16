@@ -79,7 +79,7 @@ interface Props {
   processPid?: number;
   currentRule?: RuleConfig;
   processTrust?: TrustLevel;
-  onRuleChange?: (name: string, config: RuleConfig) => void;
+  onRuleChange?: (name: string, config: RuleConfig) => void | Promise<void>;
   onClose: () => void;
   auditEvents?: AuditEvent[];
   processHistory?: { cpu: number; ram: number }[];
@@ -358,12 +358,13 @@ export default function AnalysisDrawer({
       .finally(() => setLoading(false));
   }, [processName, runAI]);
 
-  const handleActionClick = (action: RuleAction) => {
+  const handleActionClick = async (action: RuleAction) => {
     if (!onRuleChange || !processName || isLocked) return;
-    onRuleChange(processName, {
+    await onRuleChange(processName, {
       ...currentRule,
       action: currentRule.action === action ? "NONE" : action,
     });
+    onClose();
   };
 
   const handleTimeoutChange = (mins: number | null) => {

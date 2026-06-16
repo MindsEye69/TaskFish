@@ -1,12 +1,12 @@
 "use client";
 import { useState, useEffect } from "react";
-import type { ProcessProfile } from "@/lib/types";
+import type { ProcessProfile, SystemStats } from "@/lib/types";
 import styles from "./Header.module.css";
 import ResourceGraph from "./ResourceGraph";
 
 interface Props {
   totalProcesses: number;
-  statsHistory: { cpu: number; ram: number }[];
+  statsHistory: SystemStats[];
   unknownCount: number;
   loading: boolean;
   onRefresh: () => void;
@@ -31,6 +31,24 @@ interface Props {
   profiles?: ProcessProfile[];
   activeProfileId?: string;
   onApplyProfile?: (profileId: string) => void;
+}
+
+function fmtGb(mb?: number) {
+  if (!Number.isFinite(mb)) return "n/a";
+  return `${((mb ?? 0) / 1024).toFixed(1)} GB`;
+}
+
+function commitPressure(sample?: SystemStats) {
+  if (!sample) return 0;
+  if (Number.isFinite(sample.commitPressure)) return Math.max(0, Math.min(100, sample.commitPressure ?? 0));
+  if (!sample.commitLimit) return 0;
+  return Math.round(((sample.commitUsed ?? 0) / sample.commitLimit) * 100);
+}
+
+function pressureColor(pressure: number, recommended?: boolean) {
+  if (pressure >= 92) return "#ef4444";
+  if (pressure >= 85 || recommended) return "#f59e0b";
+  return "#22c55e";
 }
 
 export default function Header({
@@ -77,6 +95,13 @@ export default function Header({
       return () => clearTimeout(timer);
     }
   }, [lastUpdated]);
+
+  const latestStats = statsHistory[statsHistory.length - 1];
+  const pagePressure = commitPressure(latestStats);
+  const pageColor = pressureColor(pagePressure, latestStats?.pageFileRecommended);
+  const pageTitle = latestStats
+    ? `Commit ${fmtGb(latestStats.commitUsed)} / ${fmtGb(latestStats.commitLimit)}. Headroom ${fmtGb(latestStats.commitFree)}. Pagefile ${fmtGb(latestStats.pageFileUsed)} / ${fmtGb(latestStats.pageFileAllocated)}.`
+    : "Commit and pagefile headroom";
 
   return (
     <header className={styles.header}>
@@ -192,24 +217,32 @@ export default function Header({
             <span className={styles.statVal}>{totalProcesses}</span>
             <span className={styles.statLabel}>Procs</span>
           </div>
-          {statsHistory.length > 0 && (
-            <>
-              <ResourceGraph
-                label="CPU"
-                value={`${statsHistory[statsHistory.length - 1].cpu}%`}
-                data={statsHistory.map(s => s.cpu)}
-                color="#60a5fa"
-                max={100}
-              />
-              <ResourceGraph
-                label="RAM"
-                value={`${(statsHistory[statsHistory.length - 1].ram / 1024).toFixed(1)} GB`}
-                data={statsHistory.map(s => s.ram)}
-                color="#a855f7"
-                max={32000} // Assuming ~32GB max for scaling visually, or we can use max of data
-              />
-            </>
-          )}
+          <ResourceGraph
+            label="CPU"
+            value={statsHistory.length > 0 ? `${statsHistory[statsHistory.length - 1].cpu}%` : "–"}
+            data={statsHistory.map(s => s.cpu)}
+            color="#60a5fa"
+            max={100}
+          />
+          <ResourceGraph
+            label="RAM"
+            value={statsHistory.length > 0 ? `${(statsHistory[statsHistory.length - 1].ram / 1024).toFixed(1)} GB` : "–"}
+            data={statsHistory.map(s => s.ram)}
+            color="#a855f7"
+            max={32000}
+          />
+          <div
+            className={`${styles.pagefileWrap} ${latestStats?.pageFileRecommended ? styles.pagefileWarn : ""}`}
+            title={pageTitle}
+          >
+            <ResourceGraph
+              label="Page"
+              value={latestStats?.commitLimit ? `${pagePressure}%` : "n/a"}
+              data={statsHistory.map(s => commitPressure(s))}
+              color={pageColor}
+              max={100}
+            />
+          </div>
           {unknownCount > 0 && (
             <div className={`${styles.statItem} ${styles.warning}`}>
               <span className={styles.statVal}>{unknownCount}</span>

@@ -718,6 +718,8 @@ function createWindow() {
   log("Creating window...");
   mainWindow = new BrowserWindow({
     width: 1400, height: 900,
+    minWidth: 1180,
+    minHeight: 720,
     backgroundColor: "#191926",
     titleBarStyle: "hidden",
     titleBarOverlay: { color: "#191926", symbolColor: "#f0f0f8", height: 40 },
@@ -749,7 +751,6 @@ function createWindow() {
     mainWindow.webContents.openDevTools();
     mainWindow.loadURL("http://localhost:3000");
   } else {
-    mainWindow.webContents.openDevTools(); // temporary debug
     mainWindow.loadFile(path.join(__dirname, "../../out/index.html"));
   }
 }
@@ -1492,15 +1493,36 @@ ipcMain.handle("get-process-services", async (_event, pid: number) => {
   }
 });
 
-ipcMain.handle("get-stats", async () => {
-  try {
-    const stdout = await ps.run(
-      `$cpu = Get-CimInstance Win32_PerfFormattedData_PerfOS_Processor -Filter "Name='_Total'" | Select-Object -ExpandProperty PercentProcessorTime; $mem = Get-CimInstance Win32_OperatingSystem; $used = $mem.TotalVisibleMemorySize - $mem.FreePhysicalMemory; @{ cpu = [int]$cpu; ram = [int]($used / 1024) } | ConvertTo-Json -Compress`
+ipcMain.handle("get-stats", () => {
+  // Dedicated one-shot process — bypasses the shared PS queue so stats polling
+  // can't be starved by long-running commands (deep scan, verification, etc.).
+  const script = [
+    `$cpu = (Get-CimInstance Win32_PerfFormattedData_PerfOS_Processor -Filter "Name='_Total'").PercentProcessorTime`,
+    `$m = Get-CimInstance Win32_OperatingSystem`,
+    `$pf = @(Get-CimInstance Win32_PageFileUsage -ErrorAction SilentlyContinue)`,
+    `$pageAllocated = [int](($pf | Measure-Object -Property AllocatedBaseSize -Sum).Sum)`,
+    `$pageUsed = [int](($pf | Measure-Object -Property CurrentUsage -Sum).Sum)`,
+    `$totalRam = [int]($m.TotalVisibleMemorySize / 1024)`,
+    `$freeRam = [int]($m.FreePhysicalMemory / 1024)`,
+    `$commitLimit = [int]($m.TotalVirtualMemorySize / 1024)`,
+    `$commitFree = [int]($m.FreeVirtualMemory / 1024)`,
+    `$commitUsed = [Math]::Max(0, $commitLimit - $commitFree)`,
+    `$pressure = if ($commitLimit -gt 0) { [int][Math]::Round(($commitUsed / $commitLimit) * 100) } else { 0 }`,
+    `$needsPageFile = ($pageAllocated -lt 1024) -or (($commitLimit - $totalRam) -lt 2048) -or (($pressure -ge 85) -and (($pageAllocated - $pageUsed) -lt 4096))`,
+    `@{cpu=[int]$cpu; ram=($totalRam - $freeRam); totalRam=$totalRam; freeRam=$freeRam; commitUsed=$commitUsed; commitLimit=$commitLimit; commitFree=$commitFree; commitPressure=$pressure; pageFileUsed=$pageUsed; pageFileAllocated=$pageAllocated; pageFileRecommended=$needsPageFile} | ConvertTo-Json -Compress`,
+  ].join("; ");
+  return new Promise<{ cpu: number; ram: number }>((resolve) => {
+    execFile(
+      "powershell.exe",
+      ["-NoProfile", "-NonInteractive", "-Command", script],
+      { timeout: 8000, windowsHide: true, encoding: "utf8" } as Parameters<typeof execFile>[2],
+      (err, stdout) => {
+        if (err) { resolve({ cpu: 0, ram: 0 }); return; }
+        try { resolve(JSON.parse((stdout as string).trim())); }
+        catch { resolve({ cpu: 0, ram: 0 }); }
+      }
     );
-    return JSON.parse(stdout);
-  } catch (e) {
-    return { cpu: 0, ram: 0 };
-  }
+  });
 });
 
 // --- EVENT HEALTH ANALYSIS ---

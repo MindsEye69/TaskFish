@@ -56,6 +56,20 @@ export interface ProcessInfo {
   execPath?: string;
 }
 
+export interface SystemStats {
+  cpu: number;
+  ram: number;
+  totalRam?: number;
+  freeRam?: number;
+  commitUsed?: number;
+  commitLimit?: number;
+  commitFree?: number;
+  commitPressure?: number;
+  pageFileUsed?: number;
+  pageFileAllocated?: number;
+  pageFileRecommended?: boolean;
+}
+
 export interface ProcessGroup {
   name: string;
   trust: TrustLevel;
@@ -130,7 +144,7 @@ declare global {
       getAuditLog: () => Promise<{ id: string; ts: number; type: string; message: string; details?: any }[]>;
       appendAudit: (type: string, message: string, details?: unknown) => Promise<void>;
       notify: (title: string, body: string) => Promise<void>;
-      getStats: () => Promise<{ cpu: number, ram: number }>;
+      getStats: () => Promise<SystemStats>;
       getProcessDlls: (pid: number) => Promise<any[]>;
       getProcessNetwork: (pid: number) => Promise<{ tcp: any[], udp: any[] }>;
       getProcessServices: (pid: number) => Promise<any[]>;

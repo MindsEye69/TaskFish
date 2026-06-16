@@ -21,6 +21,14 @@ interface Props {
   onRecordStatus?: (type: string, message: string, details?: unknown) => void;
 }
 
+function normalizeProcessName(name: string) {
+  return (name || "").toLowerCase().replace(/\.exe$/i, "");
+}
+
+function isHandledByRule(rule?: RuleConfig) {
+  return Boolean(rule?.manualControl || (rule?.action && rule.action !== "NONE"));
+}
+
 const HEALTH_LABELS: Record<string, string> = {
   good: "All Clear",
   watch: "Watch",
@@ -470,8 +478,8 @@ export default function SecurityCenter({
   const bannedCount = Object.values(rules).filter(r => r.action === "BAN").length;
   const cautionRunning = runningProcesses.filter(p => {
     if (p.trust !== "unknown") return false;
-    const ruleKey = p.name.toLowerCase().replace(/\.exe$/i, "");
-    return !rules[ruleKey]?.manualControl;
+    const ruleKey = normalizeProcessName(p.name);
+    return !isHandledByRule(rules[ruleKey]);
   }).length;
 
   const ruleEntries = useMemo(() => {
@@ -491,11 +499,11 @@ export default function SecurityCenter({
   const cautionProcesses = useMemo(() => {
     const seen = new Set<string>();
     return runningProcesses.filter(p => {
-      if (p.trust !== "unknown" && p.trust !== "background") return false;
-      const ruleKey = p.name.toLowerCase().replace(/\.exe$/i, "");
-      if (rules[ruleKey]?.manualControl) return false;
-      if (seen.has(p.name)) return false;
-      seen.add(p.name);
+      if (p.trust !== "unknown") return false;
+      const ruleKey = normalizeProcessName(p.name);
+      if (isHandledByRule(rules[ruleKey])) return false;
+      if (seen.has(ruleKey)) return false;
+      seen.add(ruleKey);
       return true;
     });
   }, [runningProcesses, rules]);
