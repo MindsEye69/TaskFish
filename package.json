@@ -43,6 +43,9 @@
     "lint": "eslint",
     "electron-dev": "concurrently \"next dev\" \"tsc -p tsconfig.electron.json -w\" \"wait-on http://localhost:3000 && electron .\"",
     "electron-build": "node scripts/build.js",
+    "dashboard:refresh": "node scripts/project-dashboard.mjs refresh",
+    "dashboard:session-start": "node scripts/project-dashboard.mjs session-start",
+    "dashboard:session-close": "node scripts/project-dashboard.mjs session-close",
     "typecheck": "tsc --noEmit",
     "typecheck:electron": "tsc -p tsconfig.electron.json --noEmit",
     "test": "npx tsc -p tsconfig.electron.json && node --test tests/*.test.mjs"

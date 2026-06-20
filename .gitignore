@@ -41,6 +41,9 @@ yarn-error.log*
 # local runtime data
 /data/rules.json
 /logs/
+/dashboard.md
+/dashboards/
+/notes.md
 
 # local agent/tool state
 /.codegraph/
