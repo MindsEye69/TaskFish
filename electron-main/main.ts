@@ -2308,3 +2308,65 @@ ipcMain.handle("import-event-log", async () => {
     return { ok: false, error: String(err) };
   }
 });
+
+type LiveEventChannel = "System" | "Application" | "Security";
+
+const LIVE_EVENT_CHANNELS = new Set<LiveEventChannel>(["System", "Application", "Security"]);
+
+function normalizeLiveEventChannels(value: unknown): LiveEventChannel[] {
+  if (!Array.isArray(value)) return ["System", "Application"];
+  const channels = value.filter((channel): channel is LiveEventChannel =>
+    typeof channel === "string" && LIVE_EVENT_CHANNELS.has(channel as LiveEventChannel)
+  );
+  return channels.length > 0 ? Array.from(new Set(channels)) : ["System", "Application"];
+}
+
+ipcMain.handle("scan-live-events", async (_event, options?: { channels?: string[]; maxEventsPerChannel?: number }) => {
+  const channels = normalizeLiveEventChannels(options?.channels);
+  const maxEventsPerChannel = Math.min(Math.max(Number(options?.maxEventsPerChannel ?? 500), 50), 1000);
+  const xmlParts: string[] = [];
+  const channelResults: { channel: LiveEventChannel; ok: boolean; error?: string }[] = [];
+
+  for (const channel of channels) {
+    try {
+      const { stdout } = await safeExecFile(
+        "wevtutil",
+        ["qe", channel, "/f:xml", `/c:${maxEventsPerChannel}`],
+        { timeout: 30000, maxBuffer: 50 * 1024 * 1024 }
+      );
+      if (stdout.trim()) {
+        xmlParts.push(stdout);
+      }
+      channelResults.push({ channel, ok: true });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      log(`scan-live-events ${channel} error: ${message}`);
+      channelResults.push({ channel, ok: false, error: message });
+    }
+  }
+
+  if (xmlParts.length === 0) {
+    const detail = channelResults
+      .filter(result => !result.ok)
+      .map(result => `${result.channel}: ${result.error}`)
+      .join("; ");
+    return { ok: false, error: detail || "No live event data was returned.", channelResults };
+  }
+
+  const xml = xmlParts.join("\n");
+  const entries = parseWevtutilXml(xml);
+  const successfulChannels = channelResults.filter(result => result.ok).map(result => result.channel);
+  const report = clusterEvents(entries, `Live Events: ${successfulChannels.join(", ")}`);
+  report.fileHash = crypto.createHash("sha256").update(xml).digest("hex");
+
+  appendAudit("event-log", `Scanned live events: ${successfulChannels.join(", ")}`, {
+    totalEvents: report.totalEvents,
+    health: report.overallHealth,
+    clusters: report.clusters.length,
+    channels: successfulChannels,
+    maxEventsPerChannel,
+    skippedChannels: channelResults.filter(result => !result.ok).map(result => result.channel),
+  });
+
+  return { ok: true, report, channelResults };
+});

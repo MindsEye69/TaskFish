@@ -52,6 +52,7 @@ contextBridge.exposeInMainWorld("electron", {
   getProcessNetwork: (pid: number) => ipcRenderer.invoke("get-process-network", pid),
   getProcessServices: (pid: number) => ipcRenderer.invoke("get-process-services", pid),
   importEventLog: () => ipcRenderer.invoke("import-event-log"),
+  scanLiveEvents: (options?: any) => ipcRenderer.invoke("scan-live-events", options),
   analyzeEventHealth: (report: any, forceRefresh?: boolean) => ipcRenderer.invoke("analyze-event-health", report, forceRefresh),
   getEventFix: (finding: any, cluster: any) => ipcRenderer.invoke("get-event-fix", finding, cluster),
   chatEventFix: (finding: any, cluster: any, fix: any, messages: any[]) => ipcRenderer.invoke("chat-event-fix", finding, cluster, fix, messages),

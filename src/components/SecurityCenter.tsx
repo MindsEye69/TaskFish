@@ -5,6 +5,8 @@ import type { EventHealthReport, EventCluster, EventHealthAnalysis, EventHealthF
 import styles from "./SecurityCenter.module.css";
 
 type AuditEvent = { id: string; ts: number; type: string; message: string; details?: unknown };
+type LiveEventChannel = "System" | "Application" | "Security";
+const LIVE_EVENT_CHANNELS: LiveEventChannel[] = ["System", "Application", "Security"];
 
 interface Props {
   rules: Record<string, RuleConfig>;
@@ -208,6 +210,10 @@ export default function SecurityCenter({
   const [eventImportError, setEventImportError] = useState("");
   const [lastEventHealthError, setLastEventHealthError] = useState("");
   const [importingEvents, setImportingEvents] = useState(false);
+  const [scanningLiveEvents, setScanningLiveEvents] = useState(false);
+  const [liveEventChannels, setLiveEventChannels] = useState<LiveEventChannel[]>(["System", "Application"]);
+  const [liveEventLimit, setLiveEventLimit] = useState(500);
+  const [liveScanNotice, setLiveScanNotice] = useState("");
   const [expandedClusters, setExpandedClusters] = useState<Set<string>>(new Set());
   const [expandedCategories, setExpandedCategories] = useState<Set<string>>(new Set(["needs-attention", "watch"]));
   const [eventAnalysis, setEventAnalysis] = useState<EventHealthAnalysis | null>(null);
@@ -254,16 +260,21 @@ export default function SecurityCenter({
     onRecordStatus?.("event-log", `Event Health error: ${exactMessage}`, details);
   }, [onRecordStatus]);
 
-  const handleImportEventLog = useCallback(async () => {
-    if (!window.electron?.importEventLog) return;
-    setImportingEvents(true);
+  const resetEventHealthDetails = useCallback(() => {
     setEventImportError("");
+    setLiveScanNotice("");
     setEventAnalysis(null);
     setClusterFindings({});
     setFixResults({});
     setFixChats({});
     setFixChatInputs({});
     setExpandedFindings(new Set());
+  }, []);
+
+  const handleImportEventLog = useCallback(async () => {
+    if (!window.electron?.importEventLog) return;
+    setImportingEvents(true);
+    resetEventHealthDetails();
     try {
       const result = await window.electron.importEventLog();
       if (result.ok && result.report) {
@@ -277,7 +288,49 @@ export default function SecurityCenter({
     } finally {
       setImportingEvents(false);
     }
-  }, [recordEventHealthError]);
+  }, [recordEventHealthError, resetEventHealthDetails]);
+
+  const toggleLiveEventChannel = useCallback((channel: LiveEventChannel) => {
+    setLiveEventChannels(prev => {
+      const next = prev.includes(channel)
+        ? prev.filter(item => item !== channel)
+        : [...prev, channel];
+      return next.length > 0 ? next : prev;
+    });
+  }, []);
+
+  const handleScanLiveEvents = useCallback(async () => {
+    if (!window.electron?.scanLiveEvents || scanningLiveEvents) return;
+    setScanningLiveEvents(true);
+    resetEventHealthDetails();
+    try {
+      const result = await window.electron.scanLiveEvents({
+        channels: liveEventChannels,
+        maxEventsPerChannel: liveEventLimit,
+      });
+      if (result.ok && result.report) {
+        setEventReport(result.report);
+        setShowResults(false);
+        const skipped = (result.channelResults ?? []).filter(channel => !channel.ok);
+        setLiveScanNotice(skipped.length > 0
+          ? `Scanned available channels. Skipped ${skipped.map(channel => channel.channel).join(", ")}.`
+          : `Scanned ${liveEventChannels.join(", ")} live event channels.`
+        );
+      } else {
+        recordEventHealthError(result.error || "Live event scan failed.", {
+          phase: "live-scan",
+          channels: liveEventChannels,
+        });
+      }
+    } catch (err) {
+      recordEventHealthError(err instanceof Error ? err.message : String(err), {
+        phase: "live-scan",
+        channels: liveEventChannels,
+      });
+    } finally {
+      setScanningLiveEvents(false);
+    }
+  }, [liveEventChannels, liveEventLimit, recordEventHealthError, resetEventHealthDetails, scanningLiveEvents]);
 
   const handleAnalyzeEvents = useCallback(async () => {
     if (!eventReport || analyzingEvents || !window.electron?.analyzeEventHealth) return;
@@ -539,8 +592,8 @@ export default function SecurityCenter({
             <span className={styles.eventHealthTitle}>Import and review a saved .evtx event log</span>
             <span className={styles.eventHealthStatus}>
               {eventReport
-                ? `${eventReport.fileName} imported - ${eventReport.totalEvents.toLocaleString()} events clustered`
-                : "Ready for a Windows Event Viewer export. No live event scanning is used."}
+                ? `${eventReport.fileName} loaded - ${eventReport.totalEvents.toLocaleString()} events clustered`
+                : "Ready for live System/Application scanning or a saved Windows Event Viewer export."}
             </span>
             {eventReport && (
               <span
@@ -564,22 +617,58 @@ export default function SecurityCenter({
             )}
             <button
               type="button"
+              className={styles.liveScanBtn}
+              disabled={scanningLiveEvents || importingEvents}
+              onClick={handleScanLiveEvents}
+            >
+              {scanningLiveEvents ? "Scanning..." : "Scan Live Events"}
+            </button>
+            <button
+              type="button"
               className={styles.importBtn}
-              disabled={importingEvents}
+              disabled={importingEvents || scanningLiveEvents}
               onClick={handleImportEventLog}
             >
               {importingEvents ? "Importing..." : "Import .evtx"}
             </button>
           </div>
         </div>
+        <div className={styles.liveEventOptions}>
+          <div className={styles.channelToggles} aria-label="Live event channels">
+            {LIVE_EVENT_CHANNELS.map(channel => (
+              <label key={channel} className={styles.channelToggle}>
+                <input
+                  type="checkbox"
+                  checked={liveEventChannels.includes(channel)}
+                  onChange={() => toggleLiveEventChannel(channel)}
+                  disabled={scanningLiveEvents}
+                />
+                <span>{channel}</span>
+              </label>
+            ))}
+          </div>
+          <label className={styles.eventLimitControl}>
+            <span>Events per channel</span>
+            <select
+              value={liveEventLimit}
+              onChange={event => setLiveEventLimit(Number(event.target.value))}
+              disabled={scanningLiveEvents}
+            >
+              <option value={250}>250</option>
+              <option value={500}>500</option>
+              <option value={1000}>1000</option>
+            </select>
+          </label>
+        </div>
         {eventImportError && <div className={styles.errorText}>{eventImportError}</div>}
+        {liveScanNotice && <div className={styles.noticeText}>{liveScanNotice}</div>}
         {lastEventHealthError && lastEventHealthError !== eventImportError && (
           <div className={styles.persistentErrorText}>Last Event Health error: {lastEventHealthError}</div>
         )}
 
         {!eventReport ? (
           <div className={styles.emptyText}>
-            Import a saved Windows Event Viewer .evtx file to see deterministic clusters and optional AI-enhanced health findings here.
+            Scan live channels or import a saved Windows Event Viewer .evtx file to see deterministic clusters and optional AI-enhanced health findings here.
           </div>
         ) : (
           <div className={styles.eventReportBody}>

@@ -149,6 +149,15 @@ declare global {
       getProcessNetwork: (pid: number) => Promise<{ tcp: any[], udp: any[] }>;
       getProcessServices: (pid: number) => Promise<any[]>;
       importEventLog: () => Promise<{ ok: boolean; canceled?: boolean; error?: string; report?: EventHealthReport }>;
+      scanLiveEvents: (options?: {
+        channels?: ("System" | "Application" | "Security")[];
+        maxEventsPerChannel?: number;
+      }) => Promise<{
+        ok: boolean;
+        error?: string;
+        report?: EventHealthReport;
+        channelResults?: { channel: "System" | "Application" | "Security"; ok: boolean; error?: string }[];
+      }>;
       analyzeEventHealth: (report: EventHealthReport, forceRefresh?: boolean) => Promise<EventHealthAnalysis & { error?: string }>;
       getEventFix: (finding: EventHealthFinding, cluster: EventCluster) => Promise<EventFixResult>;
       chatEventFix: (finding: EventHealthFinding, cluster: EventCluster, fix: EventFixResult, messages: EventFixChatMessage[]) => Promise<EventFixChatResponse>;
