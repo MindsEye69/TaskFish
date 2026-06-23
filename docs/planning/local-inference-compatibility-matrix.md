@@ -8,6 +8,7 @@ TaskFish currently uses Ollama for local process analysis. This matrix records t
 
 - Windows AI overview: https://learn.microsoft.com/en-us/windows/ai/overview
 - Windows AI APIs: https://learn.microsoft.com/en-us/windows/ai/apis/
+- Windows AI APIs experimental feature table: https://learn.microsoft.com/lv-lv/windows/ai/apis/
 - Foundry Local overview: https://learn.microsoft.com/en-us/azure/foundry-local/what-is-foundry-local
 - Foundry Local Agentic Retrieval what's new: https://learn.microsoft.com/en-us/azure/azure-arc/agents-tools-foundry-local/whats-new
 - Foundry Local Agentic Retrieval release notes: https://learn.microsoft.com/en-us/azure/azure-arc/agents-tools-foundry-local/release-notes
@@ -38,6 +39,20 @@ TaskFish currently uses Ollama for local process analysis. This matrix records t
 | Offline behavior | Works after the executable and selected model are present. First-use model pull needs network unless preseeded. | Depends on API and whether model is already installed. Some readiness calls trigger downloads. | Works after runtime and model are present. First-use acquisition likely needs network. |
 | Fallback behavior | Current app: if AI is unavailable, core process controls still work; analysis shows setup/error state and can prompt model download. | If unavailable, keep current Ollama path and disable Windows-AI-specific features. | If unavailable, keep current Ollama path and show runtime-specific setup state. |
 | Retention boundary | Process prompts and generated summaries may pass through Ollama. TaskFish stores generated analysis in its cache. | Inputs pass to Windows-managed local components. Retention and diagnostics must be treated as external to TaskFish. | Inputs pass to Foundry Local. Cache and diagnostics must be classified before production use. |
+
+## Windows AI Experimental Feature Gate
+
+Phi Silica on GPU is not a stable packaging assumption for TaskFish. The Microsoft Windows AI API table reviewed on 2026-06-23 lists Phi Silica on GPU under Windows App SDK `2.2.2-experimental9` and requires a Windows Insider Experimental Channel build. The same page says GPU support is for select NVIDIA GPUs, RTX 30 series or newer with 6 GB or more VRAM, with Developer Mode enabled and the latest manufacturer GPU driver.
+
+TaskFish must use `docs/planning/windows-ai-experimental-feature-gate.md` before any Windows AI provider or packaging decision depends on experimental API behavior.
+
+| Windows AI capability | Current TaskFish decision | Channel gate | Fallback | Observability requirement |
+| --- | --- | --- | --- | --- |
+| Phi Silica on NPU | Planning only. Potential future short process-summary path on supported Copilot+ PCs. | Windows App SDK stable/limited-access support plus runtime readiness check. | Keep Ollama as default process-analysis runtime. | Log ready state, model availability, model download consent result, and provider disabled reason. |
+| Phi Silica on GPU | Experimental only. Do not package as default or assume availability. | Windows App SDK `2.2.2-experimental9`, Windows Insider Experimental Channel, supported GPU, Developer Mode, manufacturer driver. | Reject provider activation and keep Ollama/deterministic fallback. | Log `unsupported_experimental_channel`, `unsupported_gpu`, `developer_mode_required`, `model_download_required`, or `driver_requirement_unmet`. |
+| Phi Silica on CPU | Not supported per the reviewed Windows AI API hardware table. | None. | Reject and keep Ollama/deterministic fallback. | Log `phi_silica_cpu_not_supported`. |
+| Speech Recognition on CPU | Non-process-analysis feature candidate only. | API-specific runtime readiness and model download consent. | Disable feature-specific path without affecting process analysis. | Log readiness and user consent result. |
+| Video Super Resolution on CPU | Out of scope for TaskFish local inference. | API-specific runtime check if ever used. | No TaskFish action. | Not tracked until a product feature needs it. |
 
 ## Foundry Local Agentic Retrieval Preview Matrix
 
@@ -120,6 +135,7 @@ Then run a Foundry Local spike behind the same provider interface. Windows AI AP
 - 2026-06-16: Electron process-analysis prompt telemetry now passes through `electron-main/processPrivacy.ts`.
 - The current boundary is a privacy-safe telemetry builder, not a full runtime-provider abstraction.
 - 2026-06-23: Added Agentic Retrieval preview matrix covering BYOM-only endpoint behavior, `layerSelection` modes, GPU/fallback limits, chat-history privacy, diagnostics/logging assumptions, and release-note security validation ownership.
+- 2026-06-23: Added Windows AI experimental feature gate for Phi Silica on GPU and related Windows AI API fallback/observability assumptions.
 - The full provider interface should be added before Foundry Local, Windows AI API, or additional model runtime integration.
 
 ## Open Verification Items
@@ -128,5 +144,5 @@ Then run a Foundry Local spike behind the same provider interface. Windows AI AP
 - Confirm Foundry Local's JavaScript/HTTP integration shape and tool-calling behavior for structured `AnalysisResult` output.
 - Confirm Agentic Retrieval BYOM endpoint behavior, auth, timeouts, ports, chat/thread history, and diagnostics for each selected `layerSelection` mode.
 - Confirm the deployed Agentic Retrieval version includes the noted Next.js DoS and Langchain XXE fixes before enabling document ingestion, external API access, or MCP knowledge sources.
-- Confirm whether Phi Silica through Windows AI APIs can produce reliable short process summaries with the required JSON schema.
+- Confirm whether Phi Silica through Windows AI APIs can produce reliable short process summaries with the required JSON schema only after the build/channel gate in `windows-ai-experimental-feature-gate.md` passes.
 - Add automated tests that prove privacy redaction runs before `analyzeProcess` for every provider.
