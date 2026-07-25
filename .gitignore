@@ -4,6 +4,7 @@
 /node_modules
 /.pnp
 .pnp.*
+graphify-out/cache/
 .yarn/*
 !.yarn/patches
 !.yarn/plugins
