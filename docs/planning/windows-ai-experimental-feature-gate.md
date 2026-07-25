@@ -1,6 +1,6 @@
 # Windows AI Experimental Feature Gate
 
-Last updated: 2026-06-23
+Last updated: 2026-07-25
 
 This gate prevents TaskFish from treating experimental Windows AI API behavior as a stable local-inference path.
 
@@ -71,5 +71,18 @@ Before changing TaskFish local AI strategy based on Windows AI experimental beha
 
 ## Current Decision
 
-Windows AI API support remains planning-only. TaskFish should not add a Phi Silica-backed runtime path until the runtime-provider abstraction exists and this gate is implemented as executable capability checks.
+Windows AI API support remains disabled by default. The runtime-provider boundary and executable gate now exist in `electron-main/localInferenceProvider.ts`. A Windows AI request is accepted only after its declared build/channel, hardware, driver, Developer Mode, policy, consent, and model-readiness capabilities pass; because TaskFish does not yet ship a Windows App SDK bridge, an otherwise valid request is rejected with `windows_ai_runtime_unavailable` and explicitly routed back to Ollama. Deterministic analysis remains the final fallback if Ollama is unavailable or inference fails.
 
+The opt-in configuration surface is intentionally machine-local:
+
+- `TASKFISH_LOCAL_AI_PROVIDER=windows-ai`
+- `TASKFISH_WINDOWS_AI_ENABLED=1`
+- `TASKFISH_WINDOWS_APP_SDK_VERSION`
+- `TASKFISH_WINDOWS_CHANNEL`
+- `TASKFISH_WINDOWS_AI_HARDWARE` (`npu`, `gpu`, or `cpu`)
+- `TASKFISH_WINDOWS_AI_GPU_CLASS`, `TASKFISH_WINDOWS_AI_VRAM_GB`, and `TASKFISH_WINDOWS_AI_GPU_DRIVER_SUPPORTED`
+- `TASKFISH_WINDOWS_DEVELOPER_MODE`
+- `TASKFISH_WINDOWS_AI_MODEL_READY` and `TASKFISH_WINDOWS_AI_MODEL_DOWNLOAD_CONSENT`
+- `TASKFISH_WINDOWS_AI_POLICY_AVAILABLE`
+
+These values are capability evidence for the experimental gate, not a supported end-user settings contract. Gate logs contain only provider/capability metadata and a stable `reason_code`; process telemetry is collected only after routing and continues through the existing privacy normalizer.

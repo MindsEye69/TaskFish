@@ -20,6 +20,10 @@ import {
   buildPrivacySafeProcessTelemetry,
   escapeCimFilterLiteral,
 } from "./processPrivacy";
+import {
+  readLocalInferenceConfiguration,
+  selectLocalInferenceProvider,
+} from "./localInferenceProvider";
 
 // --- PERSISTENT POWERSHELL SESSION ---
 // One long-lived process handles all queries; eliminates per-poll spawning.
@@ -1391,6 +1395,17 @@ threatFlags: Array of strings representing behavior indicators (e.g. "suspicious
 const ANALYSIS_IDLE_TIMEOUT_MS = 12000; // abort if no token arrives for 12 s
 
 ipcMain.handle("analyze-process", async (event, name: string) => {
+  const inferenceConfig = readLocalInferenceConfiguration(process.env);
+  const providerRoute = selectLocalInferenceProvider(
+    inferenceConfig.requested,
+    inferenceConfig.windowsAi,
+  );
+  if (providerRoute.requested === "windows-ai") {
+    log(`[LOCAL_INFERENCE_GATE] requested=${providerRoute.requested} selected=${providerRoute.selected} hardware=${inferenceConfig.windowsAi.hardwarePath} sdk=${inferenceConfig.windowsAi.windowsAppSdkVersion ?? "unknown"} channel=${inferenceConfig.windowsAi.windowsChannel ?? "unknown"} reason_code=${providerRoute.reasonCode ?? "accepted"}`);
+  }
+
+  // Ollama is the production provider and the explicit rollback target while the
+  // Windows AI adapter remains experimental or unavailable.
   await ensureDefaultModel();
 
   const model = await getBestModel();
