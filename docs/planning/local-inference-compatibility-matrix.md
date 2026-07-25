@@ -1,6 +1,6 @@
 # Local Inference Compatibility Matrix
 
-Last updated: 2026-06-23
+Last updated: 2026-07-24
 
 TaskFish currently uses Ollama for local process analysis. This matrix records the minimum facts that must be known before adding or switching local inference runtimes.
 
@@ -22,7 +22,7 @@ TaskFish currently uses Ollama for local process analysis. This matrix records t
 | Ollama | Best current default for cross-device local LLM analysis in the Electron app. | Implemented through Electron IPC and local HTTP on `localhost:11434`. |
 | Windows AI APIs | Useful future path for Windows-native AI features when the target API covers the task and hardware support is acceptable. | Planning only. Not a drop-in replacement for the current process-analysis LLM flow. |
 | Foundry Local | Candidate for a managed local model runtime with Microsoft-hosted model acquisition and OpenAI-style app integration. | Planning candidate. Needs packaging, cache, logging, and model availability checks. |
-| Foundry Local Agentic Retrieval | Candidate edge RAG and agent orchestration layer for future TaskFish documentation, ticket, or system-health retrieval workflows. | Preview-only planning candidate. Not appropriate for default process analysis until BYOM, layer mode, diagnostics, privacy, and release-note security validation are complete. |
+| Foundry Local Agentic Retrieval | Candidate edge RAG and agent orchestration layer for future TaskFish documentation, ticket, or system-health retrieval workflows. | Preview-only planning candidate. Not appropriate for default process analysis until BYOM, layer mode, diagnostics, privacy, release-note security validation, Kubernetes networking, and managed-ingress assumptions are complete. |
 
 ## Compatibility Matrix
 
@@ -60,9 +60,23 @@ Agentic Retrieval is separate from the current TaskFish Ollama process-analysis 
 
 | Mode / `layerSelection` | What it deploys | TaskFish fit | Minimum constraints | Fallback path | Privacy and retention notes | Security validation before use |
 | --- | --- | --- | --- | --- | --- | --- |
-| `combined` | Full Agentic Retrieval platform: agent orchestration plus knowledge ingestion/RAG. | Future local knowledge assistant over TaskFish docs, imported event-log guidance, and user-approved support material. | Preview only. Requires an OpenAI-compatible BYOM language-model endpoint; embedding/image components require 2 GPUs in current preview notes; Docling parser runs on CPU. | Keep current Ollama process analysis and static docs if the platform, GPUs, or BYOM endpoint are unavailable. | Highest data boundary: thread history, knowledge collections, MCP knowledge sources, ingestion artifacts, model endpoint traffic, logs, and diagnostics all need explicit retention notes and opt-out behavior. | Validate current release includes the February 2026 security fixes for Next.js DoS and Langchain XXE before enabling document ingestion or externally reachable APIs. Confirm ports/API families exposed by the deployment are expected. |
-| `agentic` | Agents Runtime without local data ingestion. | Possible future task-planning or support-agent runtime when TaskFish needs threads, runs, streaming, or tool orchestration. | Preview only. Requires BYOM endpoint. No GPU requirement for local data ingestion in this mode because knowledge ingestion is not deployed. | Use current deterministic UI flows and Ollama analysis. Do not require Agentic Retrieval for core process controls. | Chat/thread history is part of the data boundary. Do not send raw process telemetry, command lines, paths, endpoints, or imported event excerpts without explicit user action and redaction. | Validate Agents Runtime API behavior, auth assumptions, timeouts, and streaming behavior against current release notes before any TaskFish integration. |
-| `knowledge` | Knowledge ingestion and RAG without agent orchestration. | Possible future searchable local support corpus for TaskFish docs, runbooks, event guidance, and user-imported references. | Preview only. Requires BYOM endpoint; embedding/image pipeline currently has 2-GPU preview constraint; parser is CPU-based. | Use bundled documentation and local deterministic event clustering when ingestion is unavailable. | Ingested files, collection names, vector data, parsing logs, and retrieval traces are sensitive. User-private imports must have clear deletion/export controls before production use. | Validate Langchain XXE fix and parser dependency state before accepting user-provided files. Validate collection RBAC and MCP surface exposure before indexing sensitive docs. |
+| `combined` | Full Agentic Retrieval platform: agent orchestration plus knowledge ingestion/RAG. | Future local knowledge assistant over TaskFish docs, imported event-log guidance, and user-approved support material. | Preview only. Requires an OpenAI-compatible BYOM language-model endpoint or Foundry Local endpoint; embedding/image components require 2 GPUs in current preview notes; Docling parser runs on CPU; cluster CNI must enforce Kubernetes NetworkPolicy; bring-your-own ingress is not supported. | Keep current Ollama process analysis and static docs if the platform, GPUs, CNI, managed ingress, or BYOM endpoint are unavailable. | Highest data boundary: thread history, automatic memory compaction state, knowledge collections, MCP knowledge sources, ingestion artifacts, model endpoint traffic, logs, telemetry, and diagnostics all need explicit retention notes and opt-out behavior. | Validate current release includes the February 2026 security fixes for Next.js DoS and Langchain XXE before enabling document ingestion or externally reachable APIs. Confirm ports/API families, NetworkPolicy behavior, managed ingress, secret logging, and token handling exposed by the deployment are expected. |
+| `agentic` | Agents Runtime without local data ingestion. | Possible future task-planning or support-agent runtime when TaskFish needs threads, runs, streaming, or tool orchestration. | Preview only. Requires BYOM or Foundry Local endpoint. No GPU requirement for local data ingestion in this mode because knowledge ingestion is not deployed. Use a 32K model context window when the target workflow depends on long thread/tool history. | Use current deterministic UI flows and Ollama analysis. Do not require Agentic Retrieval for core process controls. | Chat/thread history and automatic context/memory compaction are part of the data boundary. Do not send raw process telemetry, command lines, paths, endpoints, or imported event excerpts without explicit user action and redaction. | Validate Agents Runtime API behavior, auth assumptions, timeout behavior, streaming behavior, context compaction behavior, secret logging, and token handling against current release notes before any TaskFish integration. |
+| `knowledge` | Knowledge ingestion and RAG without agent orchestration. | Possible future searchable local support corpus for TaskFish docs, runbooks, event guidance, and user-imported references. | Preview only. Requires BYOM or Foundry Local endpoint; embedding/image pipeline currently has 2-GPU preview constraint; parser is CPU-based; cluster CNI must enforce Kubernetes NetworkPolicy; bring-your-own ingress is not supported. | Use bundled documentation and local deterministic event clustering when ingestion is unavailable, unsupported formats are skipped, parsing coverage is incomplete, or required GPU/network prerequisites are missing. | Ingested files, unsupported-file skip reports, parsing coverage reports, collection names, vector data, parsing logs, retrieval traces, SharePoint/disconnected-operation artifacts, and diagnostics are sensitive. User-private imports must have clear deletion/export controls before production use. | Validate Langchain XXE fix and parser dependency state before accepting user-provided files. Validate collection RBAC, MCP surface exposure, ingestion retry/cancel semantics, parsing coverage reporting, NetworkPolicy behavior, managed ingress, and secret/token logging before indexing sensitive docs. |
+
+## July 2026 Agentic Retrieval Release Notes Impact
+
+The July 2026 Agentic Retrieval preview release adds enough operational detail that TaskFish should treat the matrix above as a gated architecture note, not an implementation approval.
+
+| Release-note change | TaskFish matrix impact | Required validation before closing a mode-specific row |
+| --- | --- | --- |
+| Extension version `0.9.5` remains preview. | Keep all Agentic Retrieval modes behind planning/spike gates. | Record exact extension version and source URLs in the spike report. |
+| Large-scale ingestion now has worker scaling, automatic retries, clean cancellation, unsupported-format skip reporting, and parsing coverage reporting. | `combined` and `knowledge` modes can be evaluated for support-corpus ingestion, but only if TaskFish surfaces skipped files and coverage gaps instead of treating ingestion as complete. | Test at least one unsupported file, one cancelled run, and one partial-coverage ingestion run. |
+| Long agentic conversations use automatic context and memory compaction while preserving full conversation history. | `agentic` and `combined` modes need explicit chat-history retention, deletion, and redaction behavior before any TaskFish workflow uses threads or runs. | Verify where full history, compacted context, traces, and run metadata are stored and how a user can delete them. |
+| Security hardening calls out dependency patching and tighter secret/token handling in logs and telemetry. | Release-note security fixes are a minimum assumption, not proof that TaskFish data is safe to send. | Inspect logs/telemetry for process names, paths, endpoints, tokens, and BYOM credentials during deploy, ingestion, chat, and failure paths. |
+| Deployment requires a NetworkPolicy-capable CNI and uses its own managed ingress controller. | TaskFish cannot assume a generic local sidecar deployment; Kubernetes networking is part of compatibility. | Confirm the target cluster CNI enforces NetworkPolicy, Calico or equivalent is present, and BYO ingress is not required by the user's environment. |
+| Foundry Local model configuration recommends a 32K context window. | Agentic/task-planning use cases should not be judged against short-context model settings. | Record selected model, context length, timeout behavior, and degradation behavior when the context setting is unavailable. |
+| Chat API inputs and inference errors are more flexible and clearer. | Diagnostics can improve setup UX, but TaskFish must normalize errors into provider health states before UI integration. | Map current API errors into typed provider states such as `missing_endpoint`, `auth_failed`, `timeout`, `unsupported_mode`, and `network_policy_missing`. |
 
 ## Foundry Local Agentic Retrieval Gate
 
@@ -75,6 +89,25 @@ Do not enable Agentic Retrieval in TaskFish until a named owner has verified the
 5. **Privacy boundary:** cache paths, chat/thread history behavior, ingestion storage, diagnostics/logging, and deletion/opt-out behavior.
 6. **Security fixes:** validation that release-note security fixes affecting Next.js DoS and Langchain XXE are present before using APIs or document ingestion that depend on those components.
 7. **MCP exposure:** if `remote_mcp` or `indexed_sources_mcp` knowledge sources are used, they must go through the same tool/source trust review as any other executable integration.
+8. **Networking and ingress:** validation that the cluster CNI enforces NetworkPolicy and that the managed ingress controller model fits the deployment environment.
+9. **Conversation memory:** validation of full-history retention, context compaction storage, deletion behavior, and redaction before TaskFish uses threads or runs.
+
+## Foundry Local Agentic Retrieval Validation Backlog
+
+These tasks are blocked until TaskFish has access to a real Foundry Local Agentic Retrieval deployment or sandbox. Do not mark them complete from documentation review alone.
+
+- [ ] Assign a runtime owner for the Agentic Retrieval validation spike.
+- [ ] Record the exact extension version, deployment mode, source URLs, deployment date, and target hardware profile.
+- [ ] Verify endpoint behavior for BYOM and/or Foundry Local endpoints: URL shape, model identity, auth method, timeout behavior, error format, and whether any path can route to cloud inference.
+- [ ] Verify `combined`, `agentic`, and `knowledge` `layerSelection` behavior against the exposed API families, ports, health checks, and TaskFish feature boundaries.
+- [ ] Verify GPU and CPU constraints for each mode, including the 2-GPU embedding/image requirement, CPU parser behavior, and fallback messaging when requirements are missing.
+- [ ] Verify NetworkPolicy-capable CNI behavior and managed ingress assumptions; confirm TaskFish does not depend on bring-your-own ingress.
+- [ ] Inspect deployment, ingestion, chat, tool-use, and failure logs for raw process names, command lines, paths, endpoints, tokens, BYOM credentials, and other secret-like strings.
+- [ ] Verify retention and deletion behavior for thread history, compacted memory/context, run metadata, ingestion artifacts, vector collections, parsing coverage reports, and diagnostics.
+- [ ] Test ingestion reliability behavior with an unsupported file, a cancelled ingestion run, and a partial-coverage ingestion result; ensure skipped or missing content would be visible to TaskFish.
+- [ ] Validate the deployed version includes the release-note security fixes for Next.js DoS and Langchain XXE before enabling document ingestion, external API access, or MCP knowledge sources.
+- [ ] Map current API and deployment errors into provider health states such as `missing_endpoint`, `auth_failed`, `timeout`, `unsupported_mode`, `network_policy_missing`, and `managed_ingress_required`.
+- [ ] Write a spike report with pass/fail evidence, unresolved risks, and the decision on whether Agentic Retrieval remains planning-only, becomes an optional provider, or is rejected for TaskFish.
 
 ## TaskFish Runtime Requirements
 
@@ -135,6 +168,7 @@ Then run a Foundry Local spike behind the same provider interface. Windows AI AP
 - 2026-06-16: Electron process-analysis prompt telemetry now passes through `electron-main/processPrivacy.ts`.
 - The current boundary is a privacy-safe telemetry builder, not a full runtime-provider abstraction.
 - 2026-06-23: Added Agentic Retrieval preview matrix covering BYOM-only endpoint behavior, `layerSelection` modes, GPU/fallback limits, chat-history privacy, diagnostics/logging assumptions, and release-note security validation ownership.
+- 2026-07-24: Updated Agentic Retrieval matrix for the July 2026 `0.9.5` preview notes: ingestion retries/cancellation/coverage reporting, long-conversation memory compaction, NetworkPolicy-capable CNI, managed ingress, 32K context guidance, secret/token logging assumptions, and clearer Chat API diagnostics.
 - 2026-06-23: Added Windows AI experimental feature gate for Phi Silica on GPU and related Windows AI API fallback/observability assumptions.
 - The full provider interface should be added before Foundry Local, Windows AI API, or additional model runtime integration.
 
@@ -143,6 +177,7 @@ Then run a Foundry Local spike behind the same provider interface. Windows AI AP
 - Confirm the exact Foundry Local model cache path and diagnostics/log files on a test machine.
 - Confirm Foundry Local's JavaScript/HTTP integration shape and tool-calling behavior for structured `AnalysisResult` output.
 - Confirm Agentic Retrieval BYOM endpoint behavior, auth, timeouts, ports, chat/thread history, and diagnostics for each selected `layerSelection` mode.
+- Confirm Agentic Retrieval `0.9.5` behavior for ingestion skip/coverage reporting, cancellation, memory compaction storage, NetworkPolicy-capable CNI enforcement, managed ingress, 32K context configuration, and secret/token log redaction.
 - Confirm the deployed Agentic Retrieval version includes the noted Next.js DoS and Langchain XXE fixes before enabling document ingestion, external API access, or MCP knowledge sources.
 - Confirm whether Phi Silica through Windows AI APIs can produce reliable short process summaries with the required JSON schema only after the build/channel gate in `windows-ai-experimental-feature-gate.md` passes.
 - Add automated tests that prove privacy redaction runs before `analyzeProcess` for every provider.
