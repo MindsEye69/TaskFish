@@ -12,5 +12,5 @@
       "@/*": ["src/*"]
     }
   },
-  "include": ["electron-main/**/*"]
+  "include": ["electron-main/**/*", "src/lib/memoryAlertPolicy.ts"]
 }

@@ -9,6 +9,13 @@ import MindMap from "@/components/MindMap";
 import AnalysisDrawer from "@/components/AnalysisDrawer";
 import SecurityCenter from "@/components/SecurityCenter";
 import MemoryWatch, { type MemoryGuardianState } from "@/components/MemoryWatch";
+import {
+  advanceMemoryAlertEpisode,
+  ignoreMemoryAlertEpisode,
+  INITIAL_MEMORY_ALERT_EPISODE,
+  snoozeMemoryAlertEpisode,
+  type MemoryAlertEpisodeState,
+} from "@/lib/memoryAlertPolicy";
 
 interface ApiResponse {
   processes: ProcessInfo[];
@@ -119,7 +126,7 @@ export default function Home() {
   const webLimitedPidsRef = useRef<Set<number>>(new Set());
   const enforcementActionCooldownRef = useRef<Record<string, number>>({});
   const memoryAlertLevelRef = useRef<MemoryAlertLevel>("ok");
-  const memoryAlertAcknowledgedRef = useRef(false);
+  const memoryAlertEpisodeRef = useRef<MemoryAlertEpisodeState>(INITIAL_MEMORY_ALERT_EPISODE);
 
   useEffect(() => {
     try {
@@ -720,19 +727,20 @@ export default function Home() {
 
         const alertThreshold = Math.max(70, Math.min(98, Number(memoryAlertThresholdPct) || 85));
         const clearForRearm = pressure < alertThreshold - 5 && commitFree > 6144 && freePhysical > 3072;
-        if (clearForRearm) {
-          memoryAlertAcknowledgedRef.current = false;
-          if (activeLevel === "ok") setShowMemoryAlert(false);
-        }
 
         const shouldRequireAck =
           pressure >= alertThreshold ||
           activeLevel === "critical" ||
           (Boolean(sample.pageFileRecommended) && pressure >= Math.max(75, alertThreshold - 5));
 
-        if (shouldRequireAck && !memoryAlertAcknowledgedRef.current) {
-          setShowMemoryAlert(true);
-        }
+        const alertEpisode = advanceMemoryAlertEpisode(memoryAlertEpisodeRef.current, {
+          shouldRequireAck,
+          recovered: clearForRearm,
+          now: Date.now(),
+        });
+        memoryAlertEpisodeRef.current = alertEpisode.state;
+        if (alertEpisode.recovered) setShowMemoryAlert(false);
+        else if (alertEpisode.shouldShow) setShowMemoryAlert(true);
 
         if (rank[activeLevel] > rank[previousLevel]) {
           const title = activeLevel === "critical" ? "TaskFish memory guardian" : "TaskFish memory warning";
@@ -766,6 +774,26 @@ export default function Home() {
       setPageFileScanning(false);
     }
   }, []);
+
+  const handleSnoozeMemoryAlert = useCallback(() => {
+    memoryAlertEpisodeRef.current = snoozeMemoryAlertEpisode(memoryAlertEpisodeRef.current, Date.now());
+    setShowMemoryAlert(false);
+    addAuditEvent("memory", "Memory Guardian alert snoozed for 5 minutes", {
+      level: memoryGuardian?.level,
+      pressure: memoryGuardian?.pressure,
+    });
+    showToast("Memory alert snoozed for 5 minutes.");
+  }, [addAuditEvent, memoryGuardian, showToast]);
+
+  const handleIgnoreMemoryAlertEpisode = useCallback(() => {
+    memoryAlertEpisodeRef.current = ignoreMemoryAlertEpisode(memoryAlertEpisodeRef.current);
+    setShowMemoryAlert(false);
+    addAuditEvent("memory", "Memory Guardian alert ignored for this episode", {
+      level: memoryGuardian?.level,
+      pressure: memoryGuardian?.pressure,
+    });
+    showToast("Memory alert ignored until memory pressure recovers.");
+  }, [addAuditEvent, memoryGuardian, showToast]);
 
   useEffect(() => {
     fetchProcesses();
@@ -1663,27 +1691,27 @@ export default function Home() {
             <div style={{ color: "var(--text-dim)", fontSize: "12px", lineHeight: 1.5, marginBottom: "18px" }}>
               Check likely culprits in Memory Guardian: test servers, build watchers, browsers, Electron apps, and local AI runtimes. The popup will re-arm after memory pressure recovers below the configured threshold.
             </div>
-            <div style={{ display: "flex", justifyContent: "flex-end", gap: "10px" }}>
+            <div style={{ display: "flex", justifyContent: "flex-end", gap: "10px", flexWrap: "wrap" }}>
               <button
                 type="button"
-                onClick={() => {
-                  memoryAlertAcknowledgedRef.current = true;
-                  setShowMemoryAlert(false);
-                  addAuditEvent("memory", "Memory Guardian alert acknowledged", {
-                    threshold: memoryAlertThresholdPct,
-                    level: memoryGuardian.level,
-                    pressure: memoryGuardian.pressure,
-                    freeRamMB: memoryGuardian.freeRamMB,
-                    commitFreeMB: memoryGuardian.commitFreeMB,
-                  });
+                onClick={handleSnoozeMemoryAlert}
+                style={{
+                  background: "rgba(59,130,246,0.16)", color: "#bfdbfe", padding: "9px 14px", borderRadius: "8px",
+                  border: "1px solid rgba(96,165,250,0.55)", cursor: "pointer", fontWeight: 900,
                 }}
+              >
+                Snooze 5 min
+              </button>
+              <button
+                type="button"
+                onClick={handleIgnoreMemoryAlertEpisode}
                 style={{
                   background: memoryGuardian.level === "critical" ? "#dc2626" : "#d97706",
-                  color: "#fff", padding: "9px 20px", borderRadius: "8px",
+                  color: "#fff", padding: "9px 14px", borderRadius: "8px",
                   border: "none", cursor: "pointer", fontWeight: 900,
                 }}
               >
-                OK
+                Ignore this episode
               </button>
             </div>
           </div>
