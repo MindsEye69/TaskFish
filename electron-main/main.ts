@@ -24,6 +24,22 @@ import {
   readLocalInferenceConfiguration,
   selectLocalInferenceProvider,
 } from "./localInferenceProvider";
+import { prepareGameModeTargets } from "./gameModePolicy";
+import { assessPageFileConfiguration, PAGE_FILE_PROBE_SCRIPT } from "../src/lib/pageFileAdvisor";
+import type { GameModeSessionResult, GameModeTarget, PageFileConfiguration, ProcessPriority } from "../src/lib/types";
+import {
+  decideWatchdogAction,
+  isWatchdogProtectedProcess,
+  isWatchdogProtectedParent,
+  normalizeWatchdogName,
+  normalizeWatchdogSettings,
+  shouldRecordWatchdogTrainingObservation,
+  watchdogRuleKey,
+  type WatchdogMode,
+  type WatchdogProcessEvent,
+  type WatchdogRuleAction,
+  type WatchdogSettings,
+} from "./watchdogPolicy";
 
 // --- PERSISTENT POWERSHELL SESSION ---
 // One long-lived process handles all queries; eliminates per-poll spawning.
@@ -127,6 +143,24 @@ function safeExecFile(file: string, args: string[], options: any = {}): Promise<
 
 // --- DEBUG LOGGING ---
 let logPath = "";
+let consoleOutputUnavailable = app.isPackaged;
+
+function disableBrokenConsoleOutput(error: NodeJS.ErrnoException) {
+  if (error.code === "EPIPE") consoleOutputUnavailable = true;
+}
+
+process.stdout?.on("error", disableBrokenConsoleOutput);
+process.stderr?.on("error", disableBrokenConsoleOutput);
+
+function writeDevelopmentConsole(message: string) {
+  if (consoleOutputUnavailable) return;
+  try {
+    console.log(message);
+  } catch {
+    consoleOutputUnavailable = true;
+  }
+}
+
 function initLog() {
   try {
     const logDir = path.join(app.getPath("userData"), "logs");
@@ -134,13 +168,13 @@ function initLog() {
     logPath = path.join(logDir, "taskfish_debug.txt");
     fs.appendFileSync(logPath, `\n\n--- SESSION START: ${new Date().toISOString()} ---\n`);
   } catch (e) {
-    console.error("Failed to init log", e);
+    writeDevelopmentConsole(`Failed to init log: ${String(e)}`);
   }
 }
 
 function log(msg: string) {
   const line = `[${new Date().toISOString()}] ${msg}\n`;
-  console.log(msg);
+  writeDevelopmentConsole(msg);
   if (logPath) {
     try { fs.appendFileSync(logPath, line); } catch(e) {}
   }
@@ -157,11 +191,15 @@ const iconCachePath = path.join(userDataPath, "icon_cache.json");
 const metaCachePath = path.join(userDataPath, "process_metadata_cache.json");
 const auditLogPath   = path.join(userDataPath, "audit_log.json");
 const enforcementSettingsPath = path.join(userDataPath, "enforcement_settings.json");
+const watchdogSettingsPath = path.join(userDataPath, "watchdog_settings.json");
+const watchdogHeldPath = path.join(userDataPath, "watchdog_held_processes.json");
+const watchdogTrainingObservationsPath = path.join(userDataPath, "watchdog_training_observations.json");
+const gameModeSessionPath = path.join(userDataPath, "game_mode_session.json");
 const profilesPath = path.join(userDataPath, "profiles.json");
 const eventHealthCachePath = path.join(userDataPath, "event_health_cache.json");
 
 const iconCacheMap  = new Map<string, string>();
-const limitedPriorityPids = new Set<number>();
+const limitedPriorityPids = new Map<number, ProcessPriority>();
 const bannedPids = new Set<number>();
 const PROTECTED_PROCESS_NAMES = new Set([
   "explorer", "svchost", "lsass", "csrss", "services", "wininit", "winlogon",
@@ -171,6 +209,11 @@ const execPathCache = new Map<string, string>(); // processName.lower → execut
 
 // --- ICON CACHE HELPERS ---
 let iconSaveTimer: ReturnType<typeof setTimeout> | null = null;
+let watchdogProcess: ChildProcess | null = null;
+let watchdogRestartTimer: ReturnType<typeof setTimeout> | null = null;
+let watchdogStopping = false;
+const suspendedWatchdogEvents = new Map<string, WatchdogProcessEvent>();
+const handlingWatchdogPids = new Set<number>();
 function scheduleSaveIconCache() {
   if (iconSaveTimer) clearTimeout(iconSaveTimer);
   iconSaveTimer = setTimeout(() => {
@@ -190,6 +233,69 @@ function loadJson(p: string) {
 
 function saveJson(p: string, data: any) {
   try { fs.writeFileSync(p, JSON.stringify(data, null, 2)); } catch(e) {}
+}
+
+const PROCESS_PRIORITIES = new Set<ProcessPriority>([
+  "Idle", "BelowNormal", "Normal", "AboveNormal", "High", "RealTime",
+]);
+
+interface GameModeSessionEntry {
+  pid: number;
+  name: string;
+  previousPriority: ProcessPriority;
+  startedAt: string;
+}
+
+const gameModePriorityPids = new Map<number, GameModeSessionEntry>();
+
+function isProcessPriority(value: unknown): value is ProcessPriority {
+  return typeof value === "string" && PROCESS_PRIORITIES.has(value as ProcessPriority);
+}
+
+function saveGameModeSession() {
+  saveJson(gameModeSessionPath, [...gameModePriorityPids.values()]);
+}
+
+function loadGameModeSession() {
+  const stored = loadJson(gameModeSessionPath);
+  if (!Array.isArray(stored)) return;
+  for (const value of stored) {
+    if (!value || typeof value !== "object") continue;
+    const entry = value as Partial<GameModeSessionEntry>;
+    const pid = Number(entry.pid);
+    if (!Number.isInteger(pid) || pid <= 0 || typeof entry.name !== "string" || !isProcessPriority(entry.previousPriority) || typeof entry.startedAt !== "string") continue;
+    gameModePriorityPids.set(pid, {
+      pid,
+      name: entry.name,
+      previousPriority: entry.previousPriority,
+      startedAt: entry.startedAt,
+    });
+  }
+}
+
+loadGameModeSession();
+
+const WATCHDOG_TRAINING_OBSERVATION_LIMIT = 1000;
+const persistedTrainingObservations = loadJson(watchdogTrainingObservationsPath);
+const trainingObservedWatchdogKeys = new Set<string>(
+  Array.isArray(persistedTrainingObservations)
+    ? persistedTrainingObservations.filter((key): key is string => typeof key === "string")
+    : [],
+);
+
+function recordWatchdogTrainingObservation(name: string, executablePath?: string): boolean {
+  if (!shouldRecordWatchdogTrainingObservation(trainingObservedWatchdogKeys, name, executablePath)) {
+    return false;
+  }
+
+  trainingObservedWatchdogKeys.add(watchdogRuleKey(name, executablePath));
+  if (trainingObservedWatchdogKeys.size > WATCHDOG_TRAINING_OBSERVATION_LIMIT) {
+    const retained = [...trainingObservedWatchdogKeys].slice(-WATCHDOG_TRAINING_OBSERVATION_LIMIT);
+    trainingObservedWatchdogKeys.clear();
+    retained.forEach(key => trainingObservedWatchdogKeys.add(key));
+  }
+  saveJson(watchdogTrainingObservationsPath, [...trainingObservedWatchdogKeys]);
+  return true;
 }
 
 function appendAudit(type: string, message: string, details: any = {}) {
@@ -280,10 +386,11 @@ function offlineAnalysis(name: string) {
   };
 }
 
-async function setProcessPriority(pid: number, priority: "Idle" | "BelowNormal" | "Normal") {
+async function setProcessPriority(pid: number, priority: ProcessPriority) {
   if (!Number.isFinite(pid) || pid <= 0) return { ok: false, error: "Invalid pid" };
+  if (!isProcessPriority(priority)) return { ok: false, error: "Invalid priority" };
   const safePid = Math.trunc(pid);
-  const query = `$p=Get-Process -Id ${safePid} -ErrorAction SilentlyContinue; if($p){$p.PriorityClass='${priority}'; @{ok=$true; pid=${safePid}; priority='${priority}'} | ConvertTo-Json -Compress}else{@{ok=$false; error='Process not found'} | ConvertTo-Json -Compress}`;
+  const query = `$p=Get-Process -Id ${safePid} -ErrorAction SilentlyContinue; if($p){$previous=[string]$p.PriorityClass; $startedAt=try{$p.StartTime.ToUniversalTime().ToString('o')}catch{''}; try{$p.PriorityClass='${priority}'; @{ok=$true; pid=${safePid}; priority='${priority}'; previousPriority=$previous; startedAt=$startedAt}|ConvertTo-Json -Compress}catch{@{ok=$false; error=$_.Exception.Message; previousPriority=$previous; startedAt=$startedAt}|ConvertTo-Json -Compress}}else{@{ok=$false; error='Process not found'}|ConvertTo-Json -Compress}`;
   try {
     const stdout = await ps.run(query);
     return stdout.trim() ? JSON.parse(stdout.trim()) : { ok: false, error: "No response" };
@@ -292,10 +399,476 @@ async function setProcessPriority(pid: number, priority: "Idle" | "BelowNormal" 
   }
 }
 
+async function restoreGameModePriority(entry: GameModeSessionEntry) {
+  const expectedStartedAt = entry.startedAt.replace(/'/g, "''");
+  const query = `$p=Get-Process -Id ${entry.pid} -ErrorAction SilentlyContinue; if(-not $p){@{ok=$true; skipped=$true; reason='Process exited'}|ConvertTo-Json -Compress}else{$startedAt=try{$p.StartTime.ToUniversalTime().ToString('o')}catch{''}; if($startedAt -ne '${expectedStartedAt}'){@{ok=$true; skipped=$true; reason='Process identity changed'}|ConvertTo-Json -Compress}else{try{$p.PriorityClass='${entry.previousPriority}'; @{ok=$true}|ConvertTo-Json -Compress}catch{@{ok=$false; error=$_.Exception.Message}|ConvertTo-Json -Compress}}}`;
+  try {
+    const stdout = await ps.run(query);
+    return stdout.trim() ? JSON.parse(stdout.trim()) : { ok: false, error: "No response" };
+  } catch (error) {
+    return { ok: false, error: String(error) };
+  }
+}
+
+function getGameModeState(): GameModeSessionResult {
+  return {
+    active: gameModePriorityPids.size > 0,
+    requested: gameModePriorityPids.size,
+    changed: gameModePriorityPids.size,
+    restored: 0,
+    skipped: 0,
+    failed: 0,
+    errors: [],
+  };
+}
+
+async function activateGameMode(targets: GameModeTarget[]): Promise<GameModeSessionResult> {
+  const prepared = prepareGameModeTargets(targets);
+  const result: GameModeSessionResult = {
+    active: gameModePriorityPids.size > 0,
+    requested: Array.isArray(targets) ? targets.length : 0,
+    changed: 0,
+    restored: 0,
+    skipped: prepared.skipped,
+    failed: 0,
+    errors: [],
+  };
+
+  for (const target of prepared.accepted) {
+    if (gameModePriorityPids.has(target.pid)) {
+      result.skipped += 1;
+      continue;
+    }
+    const priorityResult = await setProcessPriority(target.pid, "Idle");
+    if (!priorityResult.ok) {
+      result.failed += 1;
+      if (priorityResult.error) result.errors.push(`${target.name}: ${priorityResult.error}`);
+      continue;
+    }
+    if (!isProcessPriority(priorityResult.previousPriority) || priorityResult.previousPriority === "Idle") {
+      result.skipped += 1;
+      continue;
+    }
+    if (typeof priorityResult.startedAt !== "string" || !priorityResult.startedAt) {
+      await setProcessPriority(target.pid, priorityResult.previousPriority);
+      result.failed += 1;
+      result.errors.push(`${target.name}: process identity could not be recorded`);
+      continue;
+    }
+    gameModePriorityPids.set(target.pid, {
+      pid: target.pid,
+      name: target.name,
+      previousPriority: priorityResult.previousPriority,
+      startedAt: priorityResult.startedAt,
+    });
+    result.changed += 1;
+  }
+
+  saveGameModeSession();
+  result.active = gameModePriorityPids.size > 0;
+  if (result.changed > 0 || result.failed > 0 || result.skipped > 0) {
+    appendAudit("game-mode", "Game Mode activated", result);
+  }
+  return result;
+}
+
+async function releaseGameMode(): Promise<GameModeSessionResult> {
+  const result: GameModeSessionResult = {
+    active: gameModePriorityPids.size > 0,
+    requested: gameModePriorityPids.size,
+    changed: 0,
+    restored: 0,
+    skipped: 0,
+    failed: 0,
+    errors: [],
+  };
+
+  for (const [pid, entry] of [...gameModePriorityPids]) {
+    const restoreResult = await restoreGameModePriority(entry);
+    if (restoreResult.ok) {
+      gameModePriorityPids.delete(pid);
+      if (restoreResult.skipped) result.skipped += 1;
+      else result.restored += 1;
+      continue;
+    }
+    result.failed += 1;
+    if (restoreResult.error) result.errors.push(`${entry.name}: ${restoreResult.error}`);
+  }
+
+  saveGameModeSession();
+  result.active = gameModePriorityPids.size > 0;
+  if (result.requested > 0) appendAudit("game-mode", "Game Mode released", result);
+  return result;
+}
+
+async function recoverGameModeSession() {
+  if (gameModePriorityPids.size === 0) return;
+  const result = await releaseGameMode();
+  log(`Recovered Game Mode session: ${result.restored} restored, ${result.skipped} skipped, ${result.failed} failed.`);
+}
+
 async function killPid(pid: number, killTree: boolean) {
-  if (!Number.isFinite(pid) || pid <= 0) return;
+  if (!Number.isFinite(pid) || pid <= 0) return false;
   const safePid = Math.trunc(pid);
-  await safeExec(killTree ? `taskkill /F /T /PID ${safePid}` : `taskkill /F /PID ${safePid}`).catch(() => {});
+  try {
+    await safeExec(killTree ? `taskkill /F /T /PID ${safePid}` : `taskkill /F /PID ${safePid}`);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+const PROCESS_CONTROL_PREAMBLE = [
+  "$source = @'",
+  "using System;",
+  "using System.Runtime.InteropServices;",
+  "public static class TaskFishProcessControl {",
+  "  [DllImport(\"kernel32.dll\", SetLastError = true)] public static extern IntPtr OpenProcess(uint access, bool inheritHandle, int processId);",
+  "  [DllImport(\"kernel32.dll\", SetLastError = true)] public static extern bool CloseHandle(IntPtr handle);",
+  "  [DllImport(\"ntdll.dll\")] public static extern int NtSuspendProcess(IntPtr handle);",
+  "  [DllImport(\"ntdll.dll\")] public static extern int NtResumeProcess(IntPtr handle);",
+  "}",
+  "'@",
+  "if (-not ('TaskFishProcessControl' -as [type])) { Add-Type -TypeDefinition $source }",
+].join("\n");
+
+function getWatchdogSettings(): WatchdogSettings {
+  return normalizeWatchdogSettings(loadJson(watchdogSettingsPath));
+}
+
+function saveWatchdogSettings(settings: WatchdogSettings) {
+  saveJson(watchdogSettingsPath, normalizeWatchdogSettings(settings));
+}
+
+function saveHeldWatchdogEvents() {
+  saveJson(watchdogHeldPath, [...suspendedWatchdogEvents.values()].filter(event => event.suspended));
+}
+
+async function recoverHeldWatchdogProcesses() {
+  const raw = loadJson(watchdogHeldPath);
+  const events = Array.isArray(raw) ? raw as WatchdogProcessEvent[] : [];
+  saveJson(watchdogHeldPath, []);
+  let recovered = 0;
+  for (const event of events) {
+    if (!event?.suspended || !Number.isFinite(event.pid) || event.pid <= 0) continue;
+    const result = await setWatchdogProcessSuspended(event.pid, false);
+    if (result.ok) recovered++;
+  }
+  if (events.length > 0) {
+    appendAudit("watchdog", `WatchDog startup recovery released ${recovered}/${events.length} held process(es).`);
+  }
+}
+
+async function setWatchdogProcessSuspended(pid: number, suspended: boolean) {
+  if (!Number.isFinite(pid) || pid <= 0) return { ok: false, error: "Invalid pid" };
+  const safePid = Math.trunc(pid);
+  const operation = suspended ? "NtSuspendProcess" : "NtResumeProcess";
+  const query = `${PROCESS_CONTROL_PREAMBLE}
+$handle = [TaskFishProcessControl]::OpenProcess([uint32]0x0800, $false, ${safePid})
+if ($handle -eq [IntPtr]::Zero) {
+  @{ok=$false; error=('OpenProcess failed: ' + [Runtime.InteropServices.Marshal]::GetLastWin32Error())} | ConvertTo-Json -Compress
+} else {
+  try {
+    $status = [TaskFishProcessControl]::${operation}($handle)
+    if ($status -eq 0) { @{ok=$true; pid=${safePid}} | ConvertTo-Json -Compress }
+    else { @{ok=$false; error=('NTSTATUS ' + $status)} | ConvertTo-Json -Compress }
+  } finally {
+    [TaskFishProcessControl]::CloseHandle($handle) | Out-Null
+  }
+}`;
+  try {
+    const { stdout } = await safeExecFile(
+      "powershell.exe",
+      ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", query],
+      { timeout: 5000 },
+    );
+    return stdout.trim() ? JSON.parse(stdout.trim()) : { ok: false, error: "No response" };
+  } catch (e) {
+    return { ok: false, error: String(e) };
+  }
+}
+
+async function getWatchdogProcessDetails(pid: number, parentPid: number) {
+  if (!Number.isFinite(pid) || pid <= 0) return {};
+  const safePid = Math.trunc(pid);
+  const safeParentPid = Number.isFinite(parentPid) && parentPid > 0 ? Math.trunc(parentPid) : 0;
+  const query = `$p=Get-CimInstance Win32_Process -Filter "ProcessId = ${safePid}" -ErrorAction SilentlyContinue; $parent=${safeParentPid > 0 ? `Get-CimInstance Win32_Process -Filter \"ProcessId = ${safeParentPid}\" -ErrorAction SilentlyContinue` : "$null"}; if($p){@{executablePath=[string]$p.ExecutablePath; parentName=[string]$parent.Name} | ConvertTo-Json -Compress}`;
+  try {
+    const { stdout } = await safeExecFile(
+      "powershell.exe",
+      ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", query],
+      { timeout: 5000 },
+    );
+    const parsed = stdout.trim() ? JSON.parse(stdout.trim()) : {};
+    return {
+      executablePath: typeof parsed.executablePath === "string" ? parsed.executablePath : undefined,
+      parentName: typeof parsed.parentName === "string" ? parsed.parentName : undefined,
+    };
+  } catch {
+    return {};
+  }
+}
+
+const WATCHDOG_EVENT_SCRIPT = [
+  "$ErrorActionPreference = 'Stop'",
+  "Register-CimIndicationEvent -Query 'SELECT * FROM Win32_ProcessStartTrace' -SourceIdentifier 'TaskFishWatchDog' | Out-Null",
+  "Write-Output '__TF_WATCHDOG_READY__'",
+  "try { while ($true) { $event = Wait-Event -SourceIdentifier 'TaskFishWatchDog'; if ($null -ne $event) { $started = $event.SourceEventArgs.NewEvent; $json = [pscustomobject]@{ pid=[int]$started.ProcessID; parentPid=[int]$started.ParentProcessID; name=[string]$started.ProcessName } | ConvertTo-Json -Compress; [Console]::Out.WriteLine($json); [Console]::Out.Flush(); Remove-Event -EventIdentifier $event.EventIdentifier -ErrorAction SilentlyContinue } } } finally { Unregister-Event -SourceIdentifier 'TaskFishWatchDog' -ErrorAction SilentlyContinue }",
+].join("; ");
+
+const WATCHDOG_TRAINING_POLL_INTERVAL_MS = 5000;
+const WATCHDOG_GUARD_POLL_INTERVAL_MS = 750;
+
+function createWatchdogPollScript(intervalMs: number) {
+  return [
+    "$ErrorActionPreference = 'Stop'",
+    "$known = @{}",
+    "$initial = @(Get-CimInstance Win32_Process | Select-Object ProcessId)",
+    "foreach ($proc in $initial) { $known[[string]$proc.ProcessId] = $true }",
+    "Write-Output '__TF_WATCHDOG_READY__'",
+    `while ($true) { Start-Sleep -Milliseconds ${intervalMs}; $next = @{}; $processes = @(Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,Name); foreach ($proc in $processes) { $procId = [int]$proc.ProcessId; $next[[string]$procId] = $true; if (-not $known.ContainsKey([string]$procId)) { $json = [pscustomobject]@{ pid=$procId; parentPid=[int]$proc.ParentProcessId; name=[string]$proc.Name } | ConvertTo-Json -Compress; [Console]::Out.WriteLine($json); [Console]::Out.Flush() } }; $known = $next }`,
+  ].join("; ");
+}
+
+async function releaseWatchdogProcesses(reason: string) {
+  const events = [...suspendedWatchdogEvents.values()];
+  for (const event of events) {
+    if (event.suspended) await setWatchdogProcessSuspended(event.pid, false);
+    suspendedWatchdogEvents.delete(event.id);
+  }
+  saveHeldWatchdogEvents();
+  if (events.length > 0) appendAudit("watchdog", `Released ${events.length} WatchDog-held process(es): ${reason}`);
+}
+
+async function handleWatchdogProcessStart(raw: { pid?: unknown; parentPid?: unknown; name?: unknown }) {
+  const pid = Number(raw.pid);
+  const parentPid = Number(raw.parentPid) || 0;
+  const name = normalizeWatchdogName(String(raw.name || ""));
+  if (
+    !Number.isFinite(pid)
+    || pid <= 0
+    || !name
+    || pid === process.pid
+    || isWatchdogProtectedProcess(name)
+    || handlingWatchdogPids.has(pid)
+  ) return;
+
+  handlingWatchdogPids.add(pid);
+  try {
+    const initialSettings = getWatchdogSettings();
+    if (initialSettings.mode === "off" || getTrust(name) !== "unknown") return;
+
+    const details = await getWatchdogProcessDetails(pid, parentPid);
+    if (isWatchdogProtectedParent(details.parentName || "")) return;
+    const settings = getWatchdogSettings();
+    const action = decideWatchdogAction({
+      mode: settings.mode,
+      name,
+      trust: getTrust(name),
+      settings,
+      executablePath: details.executablePath,
+    });
+    if (action === "ignore") return;
+
+    if (action === "block") {
+      const killed = await killPid(pid, true);
+      appendAudit("watchdog", `WatchDog ${killed ? "blocked" : "could not block"} ${name}`, {
+        pid,
+        parentPid,
+        executablePath: details.executablePath,
+        source: "blacklist",
+      });
+      notify("TaskFish WatchDog blocked a process", `${name} was ${killed ? "terminated" : "already gone or could not be terminated"}.`);
+      return;
+    }
+
+    if (action === "notify") {
+      if (!recordWatchdogTrainingObservation(name, details.executablePath)) return;
+      appendAudit("watchdog", `WatchDog observed unknown process ${name}`, {
+        pid,
+        parentPid,
+        executablePath: details.executablePath,
+        source: "training",
+      });
+      return;
+    }
+
+    const suspendedResult = await setWatchdogProcessSuspended(pid, true);
+    const event: WatchdogProcessEvent = {
+      id: `watchdog-${pid}-${Date.now()}`,
+      pid,
+      parentPid,
+      name,
+      parentName: details.parentName,
+      executablePath: details.executablePath,
+      detectedAt: Date.now(),
+      suspended: suspendedResult.ok === true,
+      requiresDecision: true,
+    };
+    suspendedWatchdogEvents.set(event.id, event);
+    saveHeldWatchdogEvents();
+    appendAudit("watchdog", `WatchDog ${event.suspended ? "held" : "alerted on"} unknown process ${name}`, {
+      pid,
+      parentPid,
+      executablePath: details.executablePath,
+      suspended: event.suspended,
+      error: event.suspended ? undefined : suspendedResult.error,
+    });
+    notify("TaskFish WatchDog needs a decision", `${name} ${event.suspended ? "is paused" : "is running; TaskFish could not pause it"}.`);
+    showMainWindow();
+    sendToMainWindow("watchdog-process-detected", event);
+  } catch (e) {
+    log(`WatchDog process handling failed: ${String(e)}`);
+  } finally {
+    handlingWatchdogPids.delete(pid);
+  }
+}
+
+function startWatchdogPolling(reason: string) {
+  const mode = getWatchdogSettings().mode;
+  if (watchdogProcess || mode === "off") return;
+  const intervalMs = mode === "training"
+    ? WATCHDOG_TRAINING_POLL_INTERVAL_MS
+    : WATCHDOG_GUARD_POLL_INTERVAL_MS;
+  watchdogStopping = false;
+  const child = spawn("powershell.exe", [
+    "-NoProfile", "-NonInteractive", "-NoLogo", "-ExecutionPolicy", "Bypass", "-Command", createWatchdogPollScript(intervalMs),
+  ], { windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
+  watchdogProcess = child;
+  let buffer = "";
+
+  child.stdout?.on("data", (chunk: Buffer) => {
+    buffer += chunk.toString();
+    const lines = buffer.split(/\r?\n/);
+    buffer = lines.pop() || "";
+    for (const line of lines) {
+      if (line === "__TF_WATCHDOG_READY__") {
+        log(`WatchDog polling fallback is running (${reason}, ${intervalMs}ms).`);
+        continue;
+      }
+      try { void handleWatchdogProcessStart(JSON.parse(line)); }
+      catch { log(`WatchDog ignored malformed polling output: ${line.slice(0, 180)}`); }
+    }
+  });
+  child.stderr?.on("data", (chunk: Buffer) => log(`WatchDog polling error: ${chunk.toString().trim()}`));
+  child.on("error", (e) => log(`WatchDog polling watcher failed to start: ${String(e)}`));
+  child.on("exit", (code) => {
+    if (watchdogProcess !== child) return;
+    watchdogProcess = null;
+    if (!watchdogStopping && getWatchdogSettings().mode !== "off") {
+      log(`WatchDog polling watcher exited (${code ?? "unknown"}); retrying.`);
+      watchdogRestartTimer = setTimeout(() => startWatchdogPolling("polling watcher restarted"), 3000);
+    }
+  });
+}
+
+function startWatchdog() {
+  if (getWatchdogSettings().mode === "off" || watchdogProcess) return;
+  watchdogStopping = false;
+  const child = spawn("powershell.exe", [
+    "-NoProfile", "-NonInteractive", "-NoLogo", "-ExecutionPolicy", "Bypass", "-Command", WATCHDOG_EVENT_SCRIPT,
+  ], { windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
+  watchdogProcess = child;
+  let buffer = "";
+  let wmiReady = false;
+
+  child.stdout?.on("data", (chunk: Buffer) => {
+    buffer += chunk.toString();
+    const lines = buffer.split(/\r?\n/);
+    buffer = lines.pop() || "";
+    for (const line of lines) {
+      if (line === "__TF_WATCHDOG_READY__") {
+        wmiReady = true;
+        log("WatchDog WMI process-start watcher is running.");
+        continue;
+      }
+      try { void handleWatchdogProcessStart(JSON.parse(line)); }
+      catch { log(`WatchDog ignored malformed event output: ${line.slice(0, 180)}`); }
+    }
+  });
+  child.stderr?.on("data", (chunk: Buffer) => log(`WatchDog watcher error: ${chunk.toString().trim()}`));
+  child.on("error", (e) => log(`WatchDog watcher failed to start: ${String(e)}`));
+  child.on("exit", (code) => {
+    if (watchdogProcess !== child) return;
+    watchdogProcess = null;
+    if (!watchdogStopping && getWatchdogSettings().mode !== "off") {
+      log(`WatchDog WMI watcher exited (${code ?? "unknown"}${wmiReady ? " after startup" : " before becoming ready"}).`);
+      startWatchdogPolling("WMI subscription unavailable");
+    }
+  });
+}
+
+async function stopWatchdog(reason: string) {
+  watchdogStopping = true;
+  if (watchdogRestartTimer) clearTimeout(watchdogRestartTimer);
+  watchdogRestartTimer = null;
+  const child = watchdogProcess;
+  watchdogProcess = null;
+  if (child) {
+    try { child.kill(); } catch {}
+  }
+  await releaseWatchdogProcesses(reason);
+}
+
+async function setWatchdogMode(mode: WatchdogMode) {
+  const settings = getWatchdogSettings();
+  const previousMode = settings.mode;
+  settings.mode = mode;
+  saveWatchdogSettings(settings);
+  if (mode === "off") {
+    await stopWatchdog("WatchDog disabled");
+  } else {
+    if (previousMode !== mode && watchdogProcess) {
+      await stopWatchdog(`WatchDog changed from ${previousMode} to ${mode} mode`);
+    }
+    startWatchdog();
+  }
+  appendAudit("watchdog", `WatchDog mode set to ${mode}`);
+  return getWatchdogState();
+}
+
+function getWatchdogState() {
+  const settings = getWatchdogSettings();
+  return {
+    mode: settings.mode,
+    rules: settings.rules,
+    pending: [...suspendedWatchdogEvents.values()],
+    watcherRunning: Boolean(watchdogProcess),
+  };
+}
+
+async function resolveWatchdogProcess(eventId: string, action: WatchdogRuleAction) {
+  const event = suspendedWatchdogEvents.get(eventId);
+  if (!event) return { ok: false, error: "This WatchDog event is no longer pending." };
+
+  const settings = getWatchdogSettings();
+  const key = watchdogRuleKey(event.name, event.executablePath);
+  settings.rules = [
+    ...settings.rules.filter(rule => rule.key !== key),
+    { key, name: event.name, executablePath: event.executablePath, action, updatedAt: Date.now() },
+  ];
+  saveWatchdogSettings(settings);
+
+  if (action === "allow") {
+    if (event.suspended) {
+      const resumed = await setWatchdogProcessSuspended(event.pid, false);
+      if (!resumed.ok) return { ok: false, error: resumed.error || "Could not resume the process." };
+    }
+    suspendedWatchdogEvents.delete(event.id);
+    saveHeldWatchdogEvents();
+    appendAudit("watchdog", `WatchDog allowed ${event.name}`, { pid: event.pid, executablePath: event.executablePath, ruleKey: key });
+    return { ok: true, action };
+  }
+
+  const killed = await killPid(event.pid, true);
+  suspendedWatchdogEvents.delete(event.id);
+  saveHeldWatchdogEvents();
+  appendAudit("watchdog", `WatchDog ${killed ? "blocked" : "recorded a block for"} ${event.name}`, {
+    pid: event.pid,
+    executablePath: event.executablePath,
+    ruleKey: key,
+  });
+  return { ok: true, action, killed };
 }
 
 async function enforceProcessRules(processes: { id: number; name: string }[], rules: Record<string, any>) {
@@ -327,7 +900,7 @@ async function enforceProcessRules(processes: { id: number; name: string }[], ru
       if (!limitedPriorityPids.has(proc.id)) {
         const result = await setProcessPriority(proc.id, "Idle");
         if (result.ok) {
-          limitedPriorityPids.add(proc.id);
+          limitedPriorityPids.set(proc.id, isProcessPriority(result.previousPriority) ? result.previousPriority : "Normal");
           appendAudit("limited", `Limited ${proc.name} to idle priority`, { pid: proc.id, name: proc.name });
           actions.push({ type: "LIMITED", name: proc.name, pid: proc.id });
         }
@@ -335,10 +908,10 @@ async function enforceProcessRules(processes: { id: number; name: string }[], ru
     }
   }
 
-  for (const pid of [...limitedPriorityPids]) {
+  for (const [pid, previousPriority] of [...limitedPriorityPids]) {
     if (!currentLimited.has(pid)) {
-      await setProcessPriority(pid, "Normal");
-      limitedPriorityPids.delete(pid);
+      const result = await setProcessPriority(pid, previousPriority);
+      if (result.ok || result.error === "Process not found") limitedPriorityPids.delete(pid);
     }
   }
 
@@ -618,8 +1191,10 @@ function openSecurityCenter() {
   sendToMainWindow("open-security-center");
 }
 
-function quitTaskFish() {
+async function quitTaskFish() {
   isQuitting = true;
+  await stopWatchdog("TaskFish is quitting");
+  await releaseGameMode();
   if (enforcementTimer) {
     clearInterval(enforcementTimer);
     enforcementTimer = null;
@@ -651,7 +1226,7 @@ function updateTrayMenu() {
     { type: "separator" },
     {
       label: "Quit TaskFish",
-      click: quitTaskFish,
+      click: () => { void quitTaskFish(); },
     },
   ]));
 }
@@ -765,13 +1340,20 @@ function createWindow() {
 
 const gotLock = app.requestSingleInstanceLock();
 if (!gotLock) {
+  log("Second TaskFish instance detected; exiting duplicate launcher.");
   app.quit();
 } else {
-  app.on("second-instance", () => { showMainWindow(); });
-  app.whenReady().then(() => {
+  app.on("second-instance", (_event, argv, workingDirectory) => {
+    log(`Second TaskFish launch redirected to existing window. cwd=${workingDirectory} argv=${argv.join(" ")}`);
+    showMainWindow();
+  });
+  app.whenReady().then(async () => {
+    await recoverHeldWatchdogProcesses();
+    await recoverGameModeSession();
     createTray();
     createWindow();
     startBackgroundEnforcement();
+    startWatchdog();
     void ensureDefaultModel();
   });
 }
@@ -780,6 +1362,7 @@ app.on("window-all-closed", () => {});
 app.on("before-quit", () => {
   isQuitting = true;
   if (enforcementTimer) clearInterval(enforcementTimer);
+  void stopWatchdog("TaskFish is quitting");
   ps.kill();
   stopOllama();
 });
@@ -1086,15 +1669,17 @@ ipcMain.handle("kill-process", async (_event, { pid, killTree }: { pid: number, 
   appendAudit("kill", `Killed PID ${pid}`, { pid, killTree });
 });
 
-ipcMain.handle("set-process-priority", async (_event, { pid, priority }: { pid: number; priority: "Idle" | "BelowNormal" | "Normal" }) => {
+ipcMain.handle("set-process-priority", async (_event, { pid, priority }: { pid: number; priority: ProcessPriority }) => {
   const result = await setProcessPriority(pid, priority);
   if (result.ok) {
-    if (priority === "Idle") limitedPriorityPids.add(pid);
-    if (priority === "Normal") limitedPriorityPids.delete(pid);
     appendAudit("priority", `Set PID ${pid} priority to ${priority}`, { pid, priority });
   }
   return result;
 });
+
+ipcMain.handle("get-game-mode-state", () => getGameModeState());
+ipcMain.handle("activate-game-mode", (_event, targets: GameModeTarget[]) => activateGameMode(Array.isArray(targets) ? targets : []));
+ipcMain.handle("release-game-mode", () => releaseGameMode());
 
 ipcMain.handle("enforce-rules", async (_event, { processes, rules }: { processes: { id: number; name: string }[]; rules: Record<string, any> }) => {
   return enforceProcessRules(processes, normalizeRules(rules));
@@ -1104,6 +1689,32 @@ ipcMain.handle("get-background-enforcement", async () => ({ rulesActive: enforce
 
 ipcMain.handle("set-background-enforcement", async (_event, active: boolean) => {
   return { rulesActive: setEnforcementActive(Boolean(active)) };
+});
+
+ipcMain.handle("get-watchdog-state", async () => getWatchdogState());
+
+ipcMain.handle("set-watchdog-mode", async (_event, mode: WatchdogMode) => {
+  if (mode !== "off" && mode !== "training" && mode !== "guard") {
+    return { ok: false, error: "Invalid WatchDog mode", ...getWatchdogState() };
+  }
+  return { ok: true, ...await setWatchdogMode(mode) };
+});
+
+ipcMain.handle("resolve-watchdog-process", async (_event, { eventId, action }: { eventId: string; action: WatchdogRuleAction }) => {
+  if ((action !== "allow" && action !== "block") || typeof eventId !== "string") {
+    return { ok: false, error: "Invalid WatchDog decision." };
+  }
+  return resolveWatchdogProcess(eventId, action);
+});
+
+ipcMain.handle("remove-watchdog-rule", async (_event, key: string) => {
+  const settings = getWatchdogSettings();
+  const nextRules = settings.rules.filter(rule => rule.key !== key);
+  if (nextRules.length === settings.rules.length) return { ok: false, error: "WatchDog rule not found." };
+  settings.rules = nextRules;
+  saveWatchdogSettings(settings);
+  appendAudit("watchdog", "Removed WatchDog rule", { key });
+  return { ok: true, ...getWatchdogState() };
 });
 
 ipcMain.handle("start-ai-service", async (event) => ensureDefaultModel(event.sender));
@@ -1538,6 +2149,44 @@ ipcMain.handle("get-process-services", async (_event, pid: number) => {
     return [];
   }
 });
+
+async function getPageFileConfiguration(): Promise<PageFileConfiguration> {
+  try {
+    const { stdout } = await safeExecFile(
+      "powershell.exe",
+      ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", PAGE_FILE_PROBE_SCRIPT],
+      { timeout: 8000 },
+    );
+    return assessPageFileConfiguration(JSON.parse(stdout.trim()));
+  } catch (error) {
+    return {
+      management: "unknown",
+      automaticManaged: false,
+      totalRamMB: 0,
+      files: [],
+      totalAllocatedMB: 0,
+      totalCurrentUsageMB: 0,
+      totalPeakUsageMB: 0,
+      totalDriveFreeMB: 0,
+      advice: {
+        kind: "unavailable",
+        title: "Pagefile settings unavailable",
+        detail: "TaskFish could not read the current Windows pagefile configuration.",
+      },
+      volumes: [],
+      placement: {
+        kind: "review-volumes",
+        title: "Pagefile placement unavailable",
+        detail: "TaskFish could not compare the current pagefile drive with local storage volumes.",
+        candidateDrives: [],
+        requiredFreeMB: 0,
+      },
+      error: String(error),
+    };
+  }
+}
+
+ipcMain.handle("get-page-file-configuration", () => getPageFileConfiguration());
 
 ipcMain.handle("get-stats", () => {
   // Dedicated one-shot process — bypasses the shared PS queue so stats polling

@@ -3,22 +3,23 @@ import type { ProcessProfile, ProcessProfilesData, RuleConfig } from "./types";
 export const MANUAL_PROFILE_ID = "manual";
 
 const limited = (): RuleConfig => ({ action: "LIMITED", autoKillMins: null });
+const gameMode = (): RuleConfig => ({ action: "ALLOW", autoKillMins: null, gameMode: true });
 
 export const DEFAULT_PROFILES: ProcessProfile[] = [
   {
     id: "gaming",
     name: "Gaming",
-    description: "Limit launchers, chat, sync, and browser helpers that commonly compete with games.",
+    description: "Tag launchers, chat, sync, and browser helpers for an explicit Game Mode session.",
     builtIn: true,
     rules: {
-      discord: limited(),
-      msedge: limited(),
-      chrome: limited(),
-      onedrive: limited(),
-      teams: limited(),
-      steamwebhelper: limited(),
-      epicgameslauncher: limited(),
-      battlenet: limited(),
+      discord: gameMode(),
+      msedge: gameMode(),
+      chrome: gameMode(),
+      onedrive: gameMode(),
+      teams: gameMode(),
+      steamwebhelper: gameMode(),
+      epicgameslauncher: gameMode(),
+      battlenet: gameMode(),
     },
   },
   {
@@ -66,6 +67,7 @@ export function normalizeProfileRules(rules: Record<string, RuleConfig> = {}) {
       autoKillMins: rule.autoKillMins ?? null,
       ...(rule.manualControl ? { manualControl: true } : {}),
       ...(rule.overrideTrust ? { overrideTrust: rule.overrideTrust } : {}),
+      ...(rule.gameMode ? { gameMode: true } : {}),
     };
   }
   return normalized;

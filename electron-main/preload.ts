@@ -38,16 +38,29 @@ contextBridge.exposeInMainWorld("electron", {
   enforceRules: (processes: any[], rules: any) => ipcRenderer.invoke("enforce-rules", { processes, rules }),
   getBackgroundEnforcement: () => ipcRenderer.invoke("get-background-enforcement"),
   setBackgroundEnforcement: (active: boolean) => ipcRenderer.invoke("set-background-enforcement", active),
+  getWatchdogState: () => ipcRenderer.invoke("get-watchdog-state"),
+  setWatchdogMode: (mode: "off" | "training" | "guard") => ipcRenderer.invoke("set-watchdog-mode", mode),
+  resolveWatchdogProcess: (eventId: string, action: "allow" | "block") => ipcRenderer.invoke("resolve-watchdog-process", { eventId, action }),
+  removeWatchdogRule: (key: string) => ipcRenderer.invoke("remove-watchdog-rule", key),
+  onWatchdogProcessDetected: (cb: (event: any) => void) => {
+    const handler = (_: Electron.IpcRendererEvent, event: any) => cb(event);
+    ipcRenderer.on("watchdog-process-detected", handler);
+    return () => ipcRenderer.removeListener("watchdog-process-detected", handler);
+  },
   onOpenSecurityCenter: (cb: () => void) => {
     const handler = () => cb();
     ipcRenderer.on("open-security-center", handler);
     return () => ipcRenderer.removeListener("open-security-center", handler);
   },
   setProcessPriority: (pid: number, priority: string) => ipcRenderer.invoke("set-process-priority", { pid, priority }),
+  getGameModeState: () => ipcRenderer.invoke("get-game-mode-state"),
+  activateGameMode: (targets: { pid: number; name: string }[]) => ipcRenderer.invoke("activate-game-mode", targets),
+  releaseGameMode: () => ipcRenderer.invoke("release-game-mode"),
   getAuditLog: () => ipcRenderer.invoke("get-audit-log"),
   appendAudit: (type: string, message: string, details: unknown = {}) => ipcRenderer.invoke("append-audit", { type, message, details }),
   notify: (title: string, body: string) => ipcRenderer.invoke("notify", { title, body }),
   getStats: () => ipcRenderer.invoke("get-stats"),
+  getPageFileConfiguration: () => ipcRenderer.invoke("get-page-file-configuration"),
   getProcessDlls: (pid: number) => ipcRenderer.invoke("get-process-dlls", pid),
   getProcessNetwork: (pid: number) => ipcRenderer.invoke("get-process-network", pid),
   getProcessServices: (pid: number) => ipcRenderer.invoke("get-process-services", pid),

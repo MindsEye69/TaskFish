@@ -20,6 +20,8 @@ interface Props {
   onSearchChange: (q: string) => void;
   onGameMode: () => void;
   gameModeActive?: boolean;
+  gameModeBusy?: boolean;
+  gameModeSummary?: string;
   onDeepScan: (forceRescan?: boolean) => void;
   isScanning?: boolean;
   scanProgress?: { current: number; total: number; name: string };
@@ -67,6 +69,8 @@ export default function Header({
   onSearchChange,
   onGameMode,
   gameModeActive = false,
+  gameModeBusy = false,
+  gameModeSummary,
   onDeepScan,
   isScanning = false,
   scanProgress = { current: 0, total: 0, name: "" },
@@ -207,9 +211,12 @@ export default function Header({
                 <option key={profile.id} value={profile.id}>{profile.name}</option>
               ))}
             </select>
-            <button type="button" className={`${styles.gameModeBtn} ${gameModeActive ? styles.gameModeActive : ""}`} onClick={onGameMode}>
-              {gameModeActive ? "Release Game Mode" : "Game Mode"}
-            </button>
+            <div className={styles.gameModeControl}>
+              <button type="button" className={`${styles.gameModeBtn} ${gameModeActive ? styles.gameModeActive : ""}`} onClick={onGameMode} disabled={gameModeBusy}>
+                {gameModeBusy ? "Updating..." : gameModeActive ? "Release Game Mode" : "Game Mode"}
+              </button>
+              {gameModeSummary && <span className={styles.gameModeSummary}>{gameModeSummary}</span>}
+            </div>
           </div>
         )}
         <div className={styles.stats}>

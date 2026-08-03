@@ -832,6 +832,22 @@ export default function AnalysisDrawer({
                       )}
 
                       <div className={`${styles.autoKillWrap} ${isLocked ? styles.locked : ""}`}>
+                        <label className={styles.gameModeToggle}>
+                          <input
+                            type="checkbox"
+                            disabled={isLocked}
+                            checked={currentRule?.gameMode === true}
+                            onChange={(e) => {
+                              if (!onRuleChange || !processName) return;
+                              onRuleChange(processName, {
+                                ...currentRule,
+                                action: currentRule?.action === "NONE" ? "ALLOW" : currentRule?.action ?? "ALLOW",
+                                gameMode: e.target.checked || undefined,
+                              });
+                            }}
+                          />
+                          <span>Include in Game Mode</span>
+                        </label>
                         <span className={styles.autoKillLabel}>Auto-Cleanup (0% CPU Inactivity)</span>
                         <select
                           className={styles.autoKillSelect}

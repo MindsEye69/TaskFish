@@ -16,7 +16,7 @@ const TRUSTED = new Set([
   "crossdeviceservice", "widgetservice", "textinputhost", "shellhost", "aggregatorhost",
   "backgroundtaskhost", "gamebar", "gamebarft", "xboxgameoverlay",
   "tabtip", "tabtipauto", "microsoftimeinputhost", "inputapp",
-  "windowsterminal", "wt",
+  "openconsole", "taskkill", "tzutil", "windowsterminal", "wt",
   // --- Security & update ---
   "uhssvc", "wbengine", "compattelrunner", "srtasks", "wuauclt",
   "msdtc", "ngen", "ngentask", "dxstat", "pcasvc",
@@ -65,7 +65,7 @@ const VERIFIED = new Set([
   // --- AI ---
   "ollama",
   // --- Source control ---
-  "githubdesktop", "git", "node", "python", "java",
+  "chatgpt", "csc", "cvtres", "gh", "githubdesktop", "git", "node", "python", "java",
 ]);
 
 export function getTrust(name: string): TrustLevel {

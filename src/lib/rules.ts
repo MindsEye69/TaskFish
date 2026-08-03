@@ -49,7 +49,7 @@ export async function saveRule(name: string, config: RuleConfig): Promise<RulesD
   const key = normalizeRuleKey(name);
   // Also remove any stale mixed-case variant that may have been saved previously
   if (key !== name) delete rules[name];
-  if (config.action === "NONE" && config.autoKillMins === null && !config.manualControl) {
+  if (config.action === "NONE" && config.autoKillMins === null && !config.manualControl && !config.gameMode) {
     delete rules[key];
   } else {
     rules[key] = config;

@@ -1,6 +1,6 @@
 "use client";
 import { useCallback, useEffect, useRef, useState, useMemo } from "react";
-import type { AnalysisResult, ProcessInfo, TreeNode, RuleConfig, ProcessProfile, AiSetupPhase, SystemStats } from "@/lib/types";
+import type { AnalysisResult, ProcessInfo, TreeNode, RuleConfig, ProcessProfile, AiSetupPhase, SystemStats, PageFileConfiguration, WatchdogMode, WatchdogProcessEvent, WatchdogRule, GameModeSessionResult, GameModeTarget } from "@/lib/types";
 import { MANUAL_PROFILE_ID } from "@/lib/profiles";
 import { buildTree, findNode, groupWithHelpers } from "@/lib/processTree";
 import Header from "@/components/Header";
@@ -8,7 +8,7 @@ import ProcessGrid from "@/components/ProcessGrid";
 import MindMap from "@/components/MindMap";
 import AnalysisDrawer from "@/components/AnalysisDrawer";
 import SecurityCenter from "@/components/SecurityCenter";
-import MemoryWatch from "@/components/MemoryWatch";
+import MemoryWatch, { type MemoryGuardianState } from "@/components/MemoryWatch";
 
 interface ApiResponse {
   processes: ProcessInfo[];
@@ -27,10 +27,17 @@ const DEFAULT_SETTINGS = {
   processPollMs: 5000,
   notificationsEnabled: true,
   rulesActive: true,
+  memoryAlertThresholdPct: 85,
 };
 
 function normalizeName(name: string) {
   return (name || "").toLowerCase().replace(/\.exe$/i, "");
+}
+
+function activeGameModeSummary(result: GameModeSessionResult): string | undefined {
+  if (!result.active) return undefined;
+  const failures = result.failed > 0 ? ` / ${result.failed} failed` : "";
+  return `${result.changed} priority lowered / no RAM trim${failures}`;
 }
 
 function processMatches(node: TreeNode, query: string): boolean {
@@ -71,7 +78,17 @@ export default function Home() {
   const [graphPollMs, setGraphPollMs] = useState(3000);
   const [processPollMs, setProcessPollMs] = useState(5000);
   const [notificationsEnabled, setNotificationsEnabled] = useState(true);
+  const [memoryAlertThresholdPct, setMemoryAlertThresholdPct] = useState(85);
+  const [showMemoryAlert, setShowMemoryAlert] = useState(false);
+  const [watchdogMode, setWatchdogMode] = useState<WatchdogMode>("off");
+  const [watchdogRules, setWatchdogRules] = useState<WatchdogRule[]>([]);
+  const [watchdogQueue, setWatchdogQueue] = useState<WatchdogProcessEvent[]>([]);
+  const [watchdogAnalysis, setWatchdogAnalysis] = useState<AnalysisResult | null>(null);
+  const [watchdogAnalyzing, setWatchdogAnalyzing] = useState(false);
+  const [watchdogDecisionBusy, setWatchdogDecisionBusy] = useState(false);
   const [gameModeActive, setGameModeActive] = useState(false);
+  const [gameModeBusy, setGameModeBusy] = useState(false);
+  const [gameModeSummary, setGameModeSummary] = useState<string | undefined>();
   const [rulesActive, setRulesActive] = useState(true);
   const [profiles, setProfiles] = useState<ProcessProfile[]>([]);
   const [activeProfileId, setActiveProfileId] = useState(MANUAL_PROFILE_ID);
@@ -85,6 +102,9 @@ export default function Home() {
   const [statsHistory, setStatsHistory] = useState<SystemStats[]>([]);
   const [processHistory, setProcessHistory] = useState<ProcessHistory>({});
   const [auditEvents, setAuditEvents] = useState<AuditEvent[]>([]);
+  const [memoryGuardian, setMemoryGuardian] = useState<MemoryGuardianState | undefined>();
+  const [pageFileConfiguration, setPageFileConfiguration] = useState<PageFileConfiguration | undefined>();
+  const [pageFileScanning, setPageFileScanning] = useState(false);
 
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const statsIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -96,10 +116,10 @@ export default function Home() {
   const aiSetupRequestedRef = useRef(false);
   const hasLoadedOnceRef = useRef(false);
   const notifiedUnknownRef = useRef<Set<string>>(new Set());
-  const gameModePidsRef = useRef<Set<number>>(new Set());
   const webLimitedPidsRef = useRef<Set<number>>(new Set());
   const enforcementActionCooldownRef = useRef<Record<string, number>>({});
   const memoryAlertLevelRef = useRef<MemoryAlertLevel>("ok");
+  const memoryAlertAcknowledgedRef = useRef(false);
 
   useEffect(() => {
     try {
@@ -110,6 +130,7 @@ export default function Home() {
       setProcessPollMs(parsed.processPollMs);
       setNotificationsEnabled(parsed.notificationsEnabled);
       setRulesActive(parsed.rulesActive ?? true);
+      setMemoryAlertThresholdPct(parsed.memoryAlertThresholdPct ?? 85);
     } catch {}
   }, []);
 
@@ -117,6 +138,16 @@ export default function Home() {
     if (!window.electron) return;
     window.electron.getBackgroundEnforcement()
       .then(({ rulesActive }) => setRulesActive(rulesActive))
+      .catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    if (!window.electron?.getGameModeState) return;
+    window.electron.getGameModeState()
+      .then((result) => {
+        setGameModeActive(result.active);
+        setGameModeSummary(activeGameModeSummary(result));
+      })
       .catch(() => {});
   }, []);
 
@@ -130,9 +161,15 @@ export default function Home() {
 
   useEffect(() => {
     try {
-      localStorage.setItem("taskfish-settings", JSON.stringify({ graphPollMs, processPollMs, notificationsEnabled, rulesActive }));
+      localStorage.setItem("taskfish-settings", JSON.stringify({
+        graphPollMs,
+        processPollMs,
+        notificationsEnabled,
+        rulesActive,
+        memoryAlertThresholdPct,
+      }));
     } catch {}
-  }, [graphPollMs, processPollMs, notificationsEnabled, rulesActive]);
+  }, [graphPollMs, processPollMs, notificationsEnabled, rulesActive, memoryAlertThresholdPct]);
 
   useEffect(() => { rulesActiveRef.current = rulesActive; }, [rulesActive]);
 
@@ -193,6 +230,95 @@ export default function Home() {
     setToastMessage(message);
     window.setTimeout(() => setToastMessage(null), 4000);
   }, []);
+
+  useEffect(() => {
+    if (!window.electron?.getWatchdogState || !window.electron.onWatchdogProcessDetected) return;
+    const mergePending = (incoming: WatchdogProcessEvent[]) => {
+      setWatchdogQueue(prev => {
+        const next = new Map(prev.map(event => [event.id, event]));
+        incoming.filter(event => event.requiresDecision).forEach(event => next.set(event.id, event));
+        return [...next.values()].sort((a, b) => a.detectedAt - b.detectedAt);
+      });
+    };
+    const receive = (event: WatchdogProcessEvent) => {
+      if (event.requiresDecision) {
+        setWatchdogAnalysis(null);
+        mergePending([event]);
+      }
+    };
+    const unsubscribe = window.electron.onWatchdogProcessDetected(receive);
+    window.electron.getWatchdogState().then(state => {
+      setWatchdogMode(state.mode);
+      setWatchdogRules(state.rules);
+      mergePending(state.pending);
+    }).catch(() => {});
+    return unsubscribe;
+  }, []);
+
+  const handleWatchdogModeChange = useCallback(async (mode: WatchdogMode) => {
+    if (!window.electron?.setWatchdogMode) {
+      showToast("WatchDog requires the TaskFish desktop app.");
+      return;
+    }
+    const state = await window.electron.setWatchdogMode(mode).catch(() => null);
+    if (!state?.ok) {
+      showToast(state?.error || "WatchDog mode could not be changed.");
+      return;
+    }
+    setWatchdogMode(state.mode);
+    setWatchdogRules(state.rules);
+    setWatchdogQueue(state.pending);
+    setWatchdogAnalysis(null);
+    addAuditEvent("watchdog", `WatchDog mode set to ${mode}`, { mode }, false);
+    showToast(`WatchDog ${mode === "off" ? "disabled" : mode === "training" ? "set to Training" : "Guard mode armed"}.`);
+  }, [addAuditEvent, showToast]);
+
+  const handleWatchdogAnalyze = useCallback(async (event: WatchdogProcessEvent) => {
+    if (!window.electron?.analyzeProcess || watchdogAnalyzing) return;
+    setWatchdogAnalyzing(true);
+    setWatchdogAnalysis(null);
+    try {
+      const result = await window.electron.analyzeProcess(event.name);
+      setWatchdogAnalysis(result);
+    } catch {
+      showToast("WatchDog analysis could not be completed.");
+    } finally {
+      setWatchdogAnalyzing(false);
+    }
+  }, [showToast, watchdogAnalyzing]);
+
+  const handleWatchdogDecision = useCallback(async (event: WatchdogProcessEvent, action: "allow" | "block") => {
+    if (!window.electron?.resolveWatchdogProcess || watchdogDecisionBusy) return;
+    setWatchdogDecisionBusy(true);
+    try {
+      const result = await window.electron.resolveWatchdogProcess(event.id, action);
+      if (!result.ok) {
+        showToast(result.error || "WatchDog could not apply that decision.");
+        return;
+      }
+      setWatchdogQueue(prev => prev.filter(item => item.id !== event.id));
+      setWatchdogAnalysis(null);
+      const state = await window.electron.getWatchdogState().catch(() => null);
+      if (state) {
+        setWatchdogRules(state.rules);
+        setWatchdogQueue(state.pending);
+      }
+      showToast(action === "allow" ? `${event.name} allowed and whitelisted.` : `${event.name} blocked and blacklisted.`);
+    } finally {
+      setWatchdogDecisionBusy(false);
+    }
+  }, [showToast, watchdogDecisionBusy]);
+
+  const handleWatchdogRuleRemoval = useCallback(async (key: string) => {
+    if (!window.electron?.removeWatchdogRule) return;
+    const result = await window.electron.removeWatchdogRule(key).catch(() => null);
+    if (!result?.ok) {
+      showToast(result?.error || "WatchDog rule could not be removed.");
+      return;
+    }
+    setWatchdogRules(result.rules ?? []);
+    showToast("WatchDog rule removed.");
+  }, [showToast]);
 
   const startAiSetup = useCallback((force = false) => {
     if (!window.electron?.startAiService) return;
@@ -540,6 +666,15 @@ export default function Home() {
           ...data,
           cpu: Number(data.cpu ?? 0),
           ram: Number(data.ram ?? 0),
+          totalRam: Number(data.totalRam ?? 0),
+          freeRam: Number(data.freeRam ?? 0),
+          commitUsed: Number(data.commitUsed ?? 0),
+          commitLimit: Number(data.commitLimit ?? 0),
+          commitFree: Number(data.commitFree ?? 0),
+          commitPressure: Number(data.commitPressure ?? 0),
+          pageFileUsed: Number(data.pageFileUsed ?? 0),
+          pageFileAllocated: Number(data.pageFileAllocated ?? 0),
+          pageFileRecommended: Boolean(data.pageFileRecommended),
         };
         setStatsHistory(prev => {
           const next = [...prev, sample];
@@ -550,26 +685,62 @@ export default function Home() {
         const commitUsed = Number(sample.commitUsed ?? 0);
         const commitFree = Number(sample.commitFree ?? Math.max(0, commitLimit - commitUsed));
         const pressure = Number(sample.commitPressure ?? (commitLimit > 0 ? Math.round((commitUsed / commitLimit) * 100) : 0));
+        const totalPhysical = Number(sample.totalRam ?? 0);
+        const freePhysical = Number(sample.freeRam ?? Math.max(0, totalPhysical - sample.ram));
         const nextLevel: MemoryAlertLevel =
-          pressure >= 92 || (commitLimit > 0 && commitFree <= 2048)
+          pressure >= 92 || (commitLimit > 0 && commitFree <= 2048) || (totalPhysical > 0 && freePhysical <= 1024)
             ? "critical"
-            : pressure >= 85 || Boolean(sample.pageFileRecommended)
+            : pressure >= 85 || (commitLimit > 0 && commitFree <= 4096) || (totalPhysical > 0 && freePhysical <= 2048) || Boolean(sample.pageFileRecommended)
               ? "warn"
               : "ok";
 
         const rank: Record<MemoryAlertLevel, number> = { ok: 0, warn: 1, critical: 2 };
         const previousLevel = memoryAlertLevelRef.current;
-        if (nextLevel === "ok" && pressure < 78 && commitFree > 4096) {
-          memoryAlertLevelRef.current = "ok";
-        } else if (rank[nextLevel] > rank[previousLevel]) {
-          memoryAlertLevelRef.current = nextLevel;
-          const freeText = commitFree > 0 ? `${(commitFree / 1024).toFixed(1)} GB` : "very little";
-          const title = nextLevel === "critical" ? "TaskFish memory failsafe" : "TaskFish memory warning";
-          const body = nextLevel === "critical"
-            ? `Commit pressure is ${pressure}%. Only ${freeText} virtual memory headroom remains.`
+        const recovered = pressure < 78 && commitFree > 6144 && freePhysical > 3072;
+        const activeLevel = nextLevel === "ok" && !recovered ? previousLevel : nextLevel;
+        memoryAlertLevelRef.current = activeLevel;
+
+        const freeText = freePhysical > 0 ? `${(freePhysical / 1024).toFixed(1)} GB` : "unknown";
+        const commitText = commitFree > 0 ? `${(commitFree / 1024).toFixed(1)} GB` : "very little";
+        const message =
+          activeLevel === "critical"
+            ? `Act now: memory headroom is dangerously low. Close test servers or heavy dev tools before Windows stalls.`
+            : activeLevel === "warn"
+              ? `Memory headroom is getting tight. Review test servers, build watchers, browsers, and local AI runtimes.`
+              : `Memory headroom looks stable.`;
+
+        setMemoryGuardian({
+          level: activeLevel,
+          pressure,
+          freeRamMB: freePhysical,
+          commitFreeMB: commitFree,
+          pageFileRecommended: Boolean(sample.pageFileRecommended),
+          message,
+        });
+
+        const alertThreshold = Math.max(70, Math.min(98, Number(memoryAlertThresholdPct) || 85));
+        const clearForRearm = pressure < alertThreshold - 5 && commitFree > 6144 && freePhysical > 3072;
+        if (clearForRearm) {
+          memoryAlertAcknowledgedRef.current = false;
+          if (activeLevel === "ok") setShowMemoryAlert(false);
+        }
+
+        const shouldRequireAck =
+          pressure >= alertThreshold ||
+          activeLevel === "critical" ||
+          (Boolean(sample.pageFileRecommended) && pressure >= Math.max(75, alertThreshold - 5));
+
+        if (shouldRequireAck && !memoryAlertAcknowledgedRef.current) {
+          setShowMemoryAlert(true);
+        }
+
+        if (rank[activeLevel] > rank[previousLevel]) {
+          const title = activeLevel === "critical" ? "TaskFish memory guardian" : "TaskFish memory warning";
+          const body = activeLevel === "critical"
+            ? `Critical memory pressure: ${pressure}% commit, ${commitText} commit headroom, ${freeText} physical RAM free.`
             : sample.pageFileRecommended
               ? `Pagefile headroom looks low. Commit pressure is ${pressure}%.`
-              : `Commit pressure is ${pressure}%. ${freeText} virtual memory headroom remains.`;
+              : `Memory pressure is rising: ${pressure}% commit, ${commitText} commit headroom, ${freeText} physical RAM free.`;
           showToast(body);
           sendNotification(title, body);
           addAuditEvent("memory", body, sample);
@@ -580,7 +751,21 @@ export default function Home() {
     } finally {
       isStatsFetchingRef.current = false;
     }
-  }, [addAuditEvent, sendNotification, showToast]);
+  }, [addAuditEvent, memoryAlertThresholdPct, sendNotification, showToast]);
+
+  const scanPageFileConfiguration = useCallback(async () => {
+    setPageFileScanning(true);
+    try {
+      const data: PageFileConfiguration = window.electron
+        ? await window.electron.getPageFileConfiguration()
+        : await fetch("/api/pagefile-config").then(response => response.json());
+      if (data?.management) setPageFileConfiguration(data);
+    } catch {
+      // Keep the last successful pagefile assessment visible.
+    } finally {
+      setPageFileScanning(false);
+    }
+  }, []);
 
   useEffect(() => {
     fetchProcesses();
@@ -809,54 +994,114 @@ export default function Home() {
   }, [processes, isScanning, fetchProcesses, fetchRules, addAuditEvent, sendNotification, refreshAiAvailability, showToast, aiSetupError, aiSetupPhase]);
 
   const handleGameMode = useCallback(async () => {
-    const limitedGroups = groups.filter(g => {
-      const rule = rulesRef.current[normalizeName(g.name)];
-      return rule && rule.action === "LIMITED";
-    });
-
-    if (limitedGroups.length === 0) {
-      alert("No processes are flagged as LIMITED.");
+    if (!window.electron?.activateGameMode || !window.electron.releaseGameMode) {
+      showToast("Game Mode requires the TaskFish desktop app.");
       return;
     }
 
-    const targetPids = limitedGroups.flatMap(g => g.children.filter(child => child.id > 0).map(child => child.id));
-    if (targetPids.length === 0) return;
-
-    if (gameModeActive) {
-      for (const pid of gameModePidsRef.current) {
-        if (window.electron) {
-          await window.electron.setProcessPriority(pid, "Normal").catch(() => null);
-        } else {
-          await fetch("/api/process-control", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ pid, priority: "Normal" })
-          }).catch(() => null);
-        }
+    setGameModeBusy(true);
+    try {
+      if (gameModeActive) {
+        const result = await window.electron.releaseGameMode();
+        setGameModeActive(result.active);
+        setGameModeSummary(result.active ? `Release incomplete / ${result.failed} failed` : undefined);
+        addAuditEvent("game-mode", "Game Mode release requested", result, false);
+        const message = result.active
+          ? `Game Mode release incomplete: ${result.failed} process${result.failed === 1 ? "" : "es"} could not be restored.`
+          : `Game Mode released: ${result.restored} restored${result.skipped ? `, ${result.skipped} skipped` : ""}.`;
+        showToast(message);
+        await sendNotification("TaskFish Game Mode", message);
+        setTimeout(fetchProcesses, 1000);
+        return;
       }
-      gameModePidsRef.current = new Set();
-      setGameModeActive(false);
-      addAuditEvent("game-mode", "Game Mode released limited processes");
-      return;
-    }
 
-    for (const pid of targetPids) {
+      const gameModeNames = new Set(
+        Object.entries(rulesRef.current)
+          .filter(([, rule]) => rule?.gameMode === true)
+          .map(([name]) => normalizeName(name)),
+      );
+      const targets: GameModeTarget[] = processes
+        .filter(process => gameModeNames.has(normalizeName(process.name)))
+        .map(process => ({ pid: process.id, name: process.name }));
+
+      if (targets.length === 0) {
+        showToast("No running processes are included in Game Mode. Apply the Gaming profile or tag an app in Process Rules.");
+        return;
+      }
+
+      const confirmed = window.confirm(
+        `Game Mode will lower CPU priority for ${targets.length} selected process${targets.length === 1 ? "" : "es"}.\n\nIt will not free RAM, trim memory, stop processes, or change Windows settings.\n\nContinue?`,
+      );
+      if (!confirmed) return;
+
+      const result = await window.electron.activateGameMode(targets);
+      setGameModeActive(result.active);
+      setGameModeSummary(activeGameModeSummary(result));
+      addAuditEvent("game-mode", "Game Mode activation requested", result, false);
+
+      const message = result.active
+        ? `Game Mode active: ${result.changed} priority lowered${result.skipped ? `, ${result.skipped} skipped` : ""}${result.failed ? `, ${result.failed} failed` : ""}.`
+        : result.failed > 0
+          ? `Game Mode could not change the selected process priorities.`
+          : `Game Mode found no process priorities to change.`;
+      showToast(message);
+      await sendNotification("TaskFish Game Mode", message);
+      setTimeout(fetchProcesses, 1000);
+    } finally {
+      setGameModeBusy(false);
+    }
+  }, [gameModeActive, processes, fetchProcesses, addAuditEvent, sendNotification, showToast]);
+
+  const handleLimitMemoryGroup = useCallback(async (name: string, pids: number[]) => {
+    const uniquePids = Array.from(new Set(pids.filter(pid => Number.isFinite(pid) && pid > 0)));
+    if (uniquePids.length === 0) return;
+
+    for (const pid of uniquePids) {
       if (window.electron) {
         await window.electron.setProcessPriority(pid, "Idle").catch(() => null);
       } else {
         await fetch("/api/process-control", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ pid, priority: "Idle" })
+          body: JSON.stringify({ pid, priority: "Idle" }),
         }).catch(() => null);
       }
     }
-    gameModePidsRef.current = new Set(targetPids);
-    setGameModeActive(true);
-    addAuditEvent("game-mode", `Game Mode limited ${targetPids.length} process(es)`);
-    sendNotification("TaskFish Game Mode", `${targetPids.length} limited process(es) moved to idle priority.`);
-    setTimeout(fetchProcesses, 1500);
-  }, [groups, gameModeActive, fetchProcesses, addAuditEvent, sendNotification]);
+
+    addAuditEvent("memory", `Memory Guardian moved ${normalizeName(name)} group to idle priority`, { name, pids: uniquePids });
+    showToast(`${name} moved to Idle priority`);
+    sendNotification("TaskFish Memory Guardian", `${name} moved to Idle priority.`);
+    setTimeout(fetchProcesses, 1000);
+  }, [addAuditEvent, fetchProcesses, sendNotification, showToast]);
+
+  const handleKillMemoryGroup = useCallback(async (name: string, pids: number[], killTree: boolean) => {
+    const uniquePids = Array.from(new Set(pids.filter(pid => Number.isFinite(pid) && pid > 0)));
+    if (uniquePids.length === 0) return;
+
+    const actionLabel = killTree ? "kill process trees" : "kill processes";
+    const confirmed = window.confirm(
+      `TaskFish will ${actionLabel} for ${name} (${uniquePids.length} process${uniquePids.length !== 1 ? "es" : ""}).\n\nContinue?`
+    );
+    if (!confirmed) return;
+
+    for (const pid of uniquePids) {
+      if (window.electron) {
+        await window.electron.killProcess(pid, killTree).catch(() => null);
+      } else {
+        await fetch("/api/kill", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ pid, killTree }),
+        }).catch(() => null);
+      }
+    }
+
+    const message = `Memory Guardian ${killTree ? "killed process trees" : "killed processes"} for ${normalizeName(name)}`;
+    addAuditEvent("memory", message, { name, pids: uniquePids, killTree });
+    showToast(`${name} ${killTree ? "process trees killed" : "processes killed"}`);
+    sendNotification("TaskFish Memory Guardian", `${name} ${killTree ? "process trees killed" : "processes killed"}.`);
+    setTimeout(fetchProcesses, 1000);
+  }, [addAuditEvent, fetchProcesses, sendNotification, showToast]);
 
   const handleNavigate = useCallback((node: TreeNode) => {
     const fresh = findNode(roots, node.id) ?? groups.find(g => g.id === node.id);
@@ -877,6 +1122,8 @@ export default function Home() {
   }, [aiAvailable, aiSetupError, aiSetupPhase, showToast]);
 
   const banCount = useMemo(() => Object.values(rules).filter(r => r.action === "BAN").length, [rules]);
+  const latestStats = useMemo(() => statsHistory[statsHistory.length - 1] ?? null, [statsHistory]);
+  const activeWatchdogEvent = watchdogQueue[0] ?? null;
 
   const displayedGroups = useMemo(() => {
     if (!searchQuery) return groups;
@@ -904,6 +1151,8 @@ export default function Home() {
         onSearchChange={setSearchQuery}
         onGameMode={handleGameMode}
         gameModeActive={gameModeActive}
+        gameModeBusy={gameModeBusy}
+        gameModeSummary={gameModeSummary}
         onDeepScan={handleDeepScan}
         isScanning={isScanning}
         scanProgress={scanProgress}
@@ -1188,6 +1437,13 @@ export default function Home() {
             <MemoryWatch
               processes={processes}
               processHistory={processHistory}
+              latestStats={latestStats}
+              guardian={memoryGuardian}
+              pageFileConfiguration={pageFileConfiguration}
+              pageFileScanning={pageFileScanning}
+              onScanPageFile={scanPageFileConfiguration}
+              onLimitGroup={handleLimitMemoryGroup}
+              onKillGroup={handleKillMemoryGroup}
               onSelect={(proc) => {
                 const node = findNode(roots, proc.id) ?? groups.find(g => normalizeName(g.name) === normalizeName(proc.name));
                 setSelected(node ?? { ...proc, children: [] });
@@ -1267,6 +1523,173 @@ export default function Home() {
         />
       )}
 
+      {activeWatchdogEvent && (
+        <div style={{
+          position: "fixed", inset: 0, background: "rgba(0,0,0,0.82)", zIndex: 3200,
+          display: "flex", alignItems: "center", justifyContent: "center",
+          WebkitAppRegion: "no-drag",
+        } as React.CSSProperties}>
+          <div style={{
+            width: "min(540px, calc(100vw - 32px))", background: "var(--bg-card)",
+            border: "1.5px solid rgba(248,113,113,0.72)", borderRadius: "8px",
+            boxShadow: "0 18px 70px rgba(0,0,0,0.68)", padding: "22px",
+          }}>
+            <div style={{
+              fontSize: "12px", fontWeight: 900, textTransform: "uppercase", letterSpacing: "0.08em",
+              color: "#f87171", marginBottom: "8px",
+            }}>
+              WatchDog
+            </div>
+            <div style={{ fontSize: "20px", fontWeight: 900, color: "var(--text)", marginBottom: "8px" }}>
+              Unknown process detected
+            </div>
+            <div style={{ color: activeWatchdogEvent.suspended ? "#fbbf24" : "#f87171", fontSize: "13px", fontWeight: 800, marginBottom: "16px" }}>
+              {activeWatchdogEvent.suspended ? "Process is paused pending your decision." : "TaskFish could not pause this process. It is still running."}
+            </div>
+            <div style={{
+              display: "grid", gridTemplateColumns: "minmax(0, 1fr) auto", gap: "8px 16px", marginBottom: "14px",
+              padding: "12px", border: "1px solid rgba(248,113,113,0.24)", borderRadius: "8px", background: "rgba(248,113,113,0.055)",
+            }}>
+              <span style={{ color: "var(--text-dim)", fontSize: "11px", fontWeight: 800, textTransform: "uppercase" }}>Process</span>
+              <span style={{ color: "var(--text)", fontSize: "13px", fontWeight: 800, textAlign: "right" }}>{activeWatchdogEvent.name}</span>
+              <span style={{ color: "var(--text-dim)", fontSize: "11px", fontWeight: 800, textTransform: "uppercase" }}>PID / Parent</span>
+              <span style={{ color: "var(--text-muted)", fontSize: "13px", textAlign: "right" }}>{activeWatchdogEvent.pid} / {activeWatchdogEvent.parentName || activeWatchdogEvent.parentPid || "Unknown"}</span>
+              <span style={{ color: "var(--text-dim)", fontSize: "11px", fontWeight: 800, textTransform: "uppercase" }}>Location</span>
+              <span style={{ color: "var(--text-muted)", fontSize: "12px", textAlign: "right", overflowWrap: "anywhere", maxWidth: "330px" }}>{activeWatchdogEvent.executablePath || "Unavailable"}</span>
+            </div>
+            {watchdogAnalysis && (
+              <div style={{
+                marginBottom: "14px", padding: "12px", border: "1px solid rgba(96,165,250,0.3)",
+                borderRadius: "8px", background: "rgba(96,165,250,0.06)",
+              }}>
+                <div style={{ color: "#93c5fd", fontSize: "12px", fontWeight: 900, textTransform: "uppercase", marginBottom: "5px" }}>
+                  Analysis: {watchdogAnalysis.verdict}
+                </div>
+                <div style={{ color: "var(--text-muted)", fontSize: "12px", lineHeight: 1.45 }}>
+                  {watchdogAnalysis.description || watchdogAnalysis.tip}
+                </div>
+              </div>
+            )}
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "10px", flexWrap: "wrap" }}>
+              <button
+                type="button"
+                onClick={() => void handleWatchdogAnalyze(activeWatchdogEvent)}
+                disabled={watchdogAnalyzing || watchdogDecisionBusy}
+                style={{
+                  background: "rgba(96,165,250,0.12)", border: "1px solid rgba(96,165,250,0.38)", color: "#bfdbfe",
+                  padding: "9px 14px", borderRadius: "8px", cursor: watchdogAnalyzing || watchdogDecisionBusy ? "default" : "pointer", fontWeight: 800,
+                }}
+              >
+                {watchdogAnalyzing ? "Analyzing..." : "Analyze"}
+              </button>
+              <div style={{ display: "flex", gap: "10px", marginLeft: "auto" }}>
+                <button
+                  type="button"
+                  onClick={() => void handleWatchdogDecision(activeWatchdogEvent, "allow")}
+                  disabled={watchdogDecisionBusy}
+                  style={{
+                    background: "#15803d", color: "#fff", padding: "9px 14px", borderRadius: "8px",
+                    border: "none", cursor: watchdogDecisionBusy ? "default" : "pointer", fontWeight: 900,
+                  }}
+                >
+                  Allow &amp; whitelist
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void handleWatchdogDecision(activeWatchdogEvent, "block")}
+                  disabled={watchdogDecisionBusy}
+                  style={{
+                    background: "#dc2626", color: "#fff", padding: "9px 14px", borderRadius: "8px",
+                    border: "none", cursor: watchdogDecisionBusy ? "default" : "pointer", fontWeight: 900,
+                  }}
+                >
+                  Block &amp; blacklist
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showMemoryAlert && memoryGuardian && (
+        <div style={{
+          position: "fixed", inset: 0, background: "rgba(0,0,0,0.78)", zIndex: 3000,
+          display: "flex", alignItems: "center", justifyContent: "center",
+          WebkitAppRegion: "no-drag",
+        } as React.CSSProperties}>
+          <div style={{
+            width: "min(460px, calc(100vw - 32px))",
+            background: "var(--bg-card)",
+            border: `1.5px solid ${memoryGuardian.level === "critical" ? "rgba(239,68,68,0.65)" : "rgba(245,158,11,0.58)"}`,
+            borderRadius: "12px",
+            boxShadow: "0 18px 70px rgba(0,0,0,0.65)",
+            padding: "22px",
+          }}>
+            <div style={{
+              fontSize: "12px", fontWeight: 900, textTransform: "uppercase",
+              letterSpacing: "0.08em", color: memoryGuardian.level === "critical" ? "#f87171" : "#fbbf24",
+              marginBottom: "8px",
+            }}>
+              Memory Guardian
+            </div>
+            <div style={{ fontSize: "20px", fontWeight: 900, color: "var(--text)", marginBottom: "10px" }}>
+              {memoryGuardian.level === "critical" ? "Critical memory pressure" : "Memory pressure warning"}
+            </div>
+            <div style={{ color: "var(--text-muted)", fontSize: "13px", lineHeight: 1.55, marginBottom: "14px" }}>
+              {memoryGuardian.message}
+            </div>
+            <div style={{
+              display: "grid", gridTemplateColumns: "repeat(3, minmax(0, 1fr))", gap: "8px",
+              marginBottom: "16px",
+            }}>
+              {[
+                ["Pressure", `${Math.round(memoryGuardian.pressure)}%`],
+                ["Free RAM", `${(memoryGuardian.freeRamMB / 1024).toFixed(1)} GB`],
+                ["Commit left", `${(memoryGuardian.commitFreeMB / 1024).toFixed(1)} GB`],
+              ].map(([label, value]) => (
+                <div key={label} style={{
+                  padding: "10px", border: "1px solid rgba(255,255,255,0.08)",
+                  borderRadius: "8px", background: "rgba(255,255,255,0.035)",
+                }}>
+                  <div style={{ color: "var(--text-dim)", fontSize: "10px", fontWeight: 800, textTransform: "uppercase" }}>
+                    {label}
+                  </div>
+                  <div style={{ color: "var(--text)", fontSize: "15px", fontWeight: 900, marginTop: "3px" }}>
+                    {value}
+                  </div>
+                </div>
+              ))}
+            </div>
+            <div style={{ color: "var(--text-dim)", fontSize: "12px", lineHeight: 1.5, marginBottom: "18px" }}>
+              Check likely culprits in Memory Guardian: test servers, build watchers, browsers, Electron apps, and local AI runtimes. The popup will re-arm after memory pressure recovers below the configured threshold.
+            </div>
+            <div style={{ display: "flex", justifyContent: "flex-end", gap: "10px" }}>
+              <button
+                type="button"
+                onClick={() => {
+                  memoryAlertAcknowledgedRef.current = true;
+                  setShowMemoryAlert(false);
+                  addAuditEvent("memory", "Memory Guardian alert acknowledged", {
+                    threshold: memoryAlertThresholdPct,
+                    level: memoryGuardian.level,
+                    pressure: memoryGuardian.pressure,
+                    freeRamMB: memoryGuardian.freeRamMB,
+                    commitFreeMB: memoryGuardian.commitFreeMB,
+                  });
+                }}
+                style={{
+                  background: memoryGuardian.level === "critical" ? "#dc2626" : "#d97706",
+                  color: "#fff", padding: "9px 20px", borderRadius: "8px",
+                  border: "none", cursor: "pointer", fontWeight: 900,
+                }}
+              >
+                OK
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {showSettings && (
         <div style={{
           position: "fixed", inset: 0, background: "rgba(0,0,0,0.8)", zIndex: 100,
@@ -1275,7 +1698,8 @@ export default function Home() {
         } as React.CSSProperties}>
           <div style={{
             background: "var(--bg-card)", padding: "24px", borderRadius: "16px",
-            width: "400px", border: "1px solid var(--border)", boxShadow: "0 10px 40px rgba(0,0,0,0.5)"
+            width: "min(440px, calc(100vw - 32px))", maxHeight: "calc(100vh - 32px)", overflowY: "auto",
+            border: "1px solid var(--border)", boxShadow: "0 10px 40px rgba(0,0,0,0.5)"
           }}>
             <h2 style={{ marginBottom: "16px", color: "var(--text)" }}>Dashboard Settings</h2>
             
@@ -1316,6 +1740,79 @@ export default function Home() {
                 <option value={10000}>10 seconds</option>
                 <option value={30000}>30 seconds</option>
               </select>
+            </div>
+
+            <div style={{ marginBottom: "24px" }}>
+              <label style={{ display: "block", fontSize: "14px", color: "var(--text-muted)", marginBottom: "8px" }}>
+                Memory Guardian alert threshold
+              </label>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr auto", gap: "10px", alignItems: "center" }}>
+                <input
+                  type="range"
+                  min={70}
+                  max={95}
+                  step={5}
+                  value={memoryAlertThresholdPct}
+                  onChange={(e) => setMemoryAlertThresholdPct(Number(e.target.value))}
+                  style={{ width: "100%", accentColor: "#f59e0b" }}
+                />
+                <span style={{ minWidth: "44px", textAlign: "right", color: "#fbbf24", fontSize: "14px", fontWeight: 800 }}>
+                  {memoryAlertThresholdPct}%
+                </span>
+              </div>
+              <div style={{ marginTop: "6px", color: "var(--text-dim)", fontSize: "11px", lineHeight: 1.45 }}>
+                Shows an acknowledgement popup when Windows commit pressure crosses this level.
+              </div>
+            </div>
+
+            <div style={{ marginBottom: "24px", borderTop: "1px solid var(--border)", paddingTop: "16px" }}>
+              <div style={{ fontSize: "14px", color: "var(--text-muted)", marginBottom: "8px" }}>WatchDog Mode</div>
+              <div role="radiogroup" aria-label="WatchDog mode" style={{ display: "grid", gridTemplateColumns: "repeat(3, minmax(0, 1fr))", gap: "6px" }}>
+                {([
+                  ["off", "Off", "WatchDog is disabled."],
+                  ["training", "Training", "WatchDog observes unknown process starts but never pauses them."],
+                  ["guard", "Guard", "WatchDog pauses unknown process starts until you decide."],
+                ] as const).map(([mode, label, tooltip]) => {
+                  const selectedMode = watchdogMode === mode;
+                  return (
+                    <button
+                      key={mode}
+                      type="button"
+                      role="radio"
+                      aria-checked={selectedMode}
+                      title={tooltip}
+                      onClick={() => void handleWatchdogModeChange(mode)}
+                      style={{
+                        minHeight: "36px", borderRadius: "8px", padding: "7px 8px", fontSize: "12px", fontWeight: 800,
+                        cursor: "pointer", border: `1px solid ${selectedMode ? (mode === "guard" ? "#f87171" : "#60a5fa") : "var(--border)"}`,
+                        background: selectedMode ? (mode === "guard" ? "rgba(248,113,113,0.14)" : "rgba(96,165,250,0.13)") : "rgba(0,0,0,0.16)",
+                        color: selectedMode ? "var(--text)" : "var(--text-dim)",
+                      }}
+                    >
+                      {label}
+                    </button>
+                  );
+                })}
+              </div>
+              {watchdogRules.length > 0 && (
+                <div style={{ marginTop: "12px", display: "flex", flexDirection: "column", gap: "5px" }}>
+                  {watchdogRules.slice(0, 5).map(rule => (
+                    <div key={rule.key} style={{ display: "grid", gridTemplateColumns: "auto minmax(0, 1fr) auto", gap: "8px", alignItems: "center", fontSize: "11px" }}>
+                      <span style={{ color: rule.action === "allow" ? "#4ade80" : "#f87171", fontWeight: 900, textTransform: "uppercase" }}>{rule.action}</span>
+                      <span title={rule.executablePath || rule.name} style={{ color: "var(--text-muted)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{rule.name}</span>
+                      <button
+                        type="button"
+                        title={`Remove WatchDog ${rule.action} rule for ${rule.name}`}
+                        aria-label={`Remove WatchDog ${rule.action} rule for ${rule.name}`}
+                        onClick={() => void handleWatchdogRuleRemoval(rule.key)}
+                        style={{ background: "none", border: "none", color: "var(--text-dim)", cursor: "pointer", padding: "2px 5px", fontSize: "16px", lineHeight: 1 }}
+                      >
+                        ×
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
 
             <label style={{ display: "flex", alignItems: "center", gap: "10px", marginBottom: "20px", color: "var(--text-muted)", fontSize: "14px" }}>
