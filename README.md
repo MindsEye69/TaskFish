@@ -21,7 +21,12 @@ bun dev
    ```bash
    npm run electron-build
    ```
-3. **Output**: Your installer will be generated in the `dist_electron/` folder.
+3. **Development package** (uses an installed local Ollama and omits `resources/bin`):
+   ```bash
+   npm run electron-build:dev
+   ```
+   This does not package an Ollama executable or model. Locally downloaded Ollama models are never bundled.
+4. **Output**: Your installer will be generated in the `dist_electron/` folder.
 
 > **Offline / CI builds**: set `TASKFISH_SKIP_OLLAMA_DOWNLOAD=1` together with `TASKFISH_ALLOW_MISSING_OLLAMA=1` to skip the Ollama download (AI features will be unavailable in that build).
 

@@ -12,6 +12,7 @@ const ollamaExePath = path.join(resourcesBinDir, "ollama.exe");
 const ollamaZipPath = path.join(resourcesBinDir, "ollama-windows-amd64.zip");
 const ollamaAssetName = "ollama-windows-amd64.zip";
 const buildLogPath = path.join(rootDir, "dist_electron", "taskfish-build.log");
+const developmentBuild = process.env.TASKFISH_DEV_BUILD === "1";
 
 function appendBuildLog(message) {
   fs.mkdirSync(path.dirname(buildLogPath), { recursive: true });
@@ -54,6 +55,10 @@ function downloadFile(url, destination) {
 
 async function ensureOllamaBinary() {
   if (process.platform !== "win32") return;
+  if (developmentBuild) {
+    console.log("Development build: using locally installed Ollama and omitting bundled runtime resources.");
+    return;
+  }
   if (fs.existsSync(ollamaExePath)) {
     console.log("Bundled Ollama binary already present.");
     return;
@@ -139,7 +144,7 @@ if (process.exitCode !== 1) {
   try {
     runLogged("npx tsc -p tsconfig.electron.json", "Compiling Electron files...");
 
-    runLogged("npx electron-builder", "Packaging Electron app...");
+    runLogged("npx electron-builder --config scripts/electron-builder.config.cjs", "Packaging Electron app...");
   } catch (err) {
     console.error("Packaging failed:", err);
     appendBuildLog(`Packaging failed: ${err && err.message ? err.message : String(err)}`);

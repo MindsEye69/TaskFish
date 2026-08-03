@@ -8,7 +8,9 @@
   "build": {
     "appId": "com.mindseye.taskfish",
     "productName": "TaskFish",
-    "directories": { "output": "dist_electron" },
+    "directories": {
+      "output": "dist_electron"
+    },
     "files": [
       "build/icon.ico",
       "dist/**/*",
@@ -43,6 +45,7 @@
     "lint": "eslint",
     "electron-dev": "concurrently \"next dev\" \"tsc -p tsconfig.electron.json -w\" \"wait-on http://localhost:3000 && electron .\"",
     "electron-build": "node scripts/build.js",
+    "electron-build:dev": "set \"TASKFISH_DEV_BUILD=1\"&& node scripts/build.js",
     "dashboard:refresh": "node scripts/project-dashboard.mjs refresh",
     "dashboard:session-start": "node scripts/project-dashboard.mjs session-start",
     "dashboard:session-close": "node scripts/project-dashboard.mjs session-close",
@@ -51,9 +54,18 @@
     "test": "npx tsc -p tsconfig.electron.json && node --test tests/*.test.mjs"
   },
   "dependencies": {
-    "next": "16.2.4",
+    "next": "16.2.12",
     "react": "19.2.4",
     "react-dom": "19.2.4"
+  },
+  "overrides": {
+    "postcss": "8.5.25",
+    "sharp": "0.35.3",
+    "eslint": {
+      "minimatch": {
+        "brace-expansion": "1.1.18"
+      }
+    }
   },
   "devDependencies": {
     "@types/node": "^20",

@@ -1537,9 +1537,7 @@ export default function Home() {
           processTrust={processes.find(p => normalizeName(p.name) === normalizeName(analysisTarget.name))?.trust}
           onRuleChange={async (name, config) => {
             await handleRuleChange(name, config);
-            setAnalysisTarget(null);
-            setSelected(null);
-            setView("list");
+            // The drawer closes itself after an explicit action. Manual Control must stay open for follow-up choices.
             fetchProcesses();
           }}
           onClose={() => setAnalysisTarget(null)}
