@@ -1301,8 +1301,8 @@ function createWindow() {
   log("Creating window...");
   mainWindow = new BrowserWindow({
     width: 1400, height: 900,
-    minWidth: 1180,
-    minHeight: 720,
+    minWidth: 900,
+    minHeight: 620,
     backgroundColor: "#191926",
     titleBarStyle: "hidden",
     titleBarOverlay: { color: "#191926", symbolColor: "#f0f0f8", height: 40 },

@@ -455,3 +455,106 @@
   border-radius: 999px;
   box-shadow: 0 0 8px var(--unknown);
 }
+
+@media (max-width: 1180px) {
+  .header {
+    gap: 10px;
+    padding: 12px 140px 10px 16px;
+  }
+
+  .left,
+  .right {
+    flex: 1 0 100%;
+  }
+
+  .right {
+    justify-content: flex-start;
+  }
+
+  .headerActions,
+  .stats {
+    justify-content: flex-start;
+  }
+
+  .center {
+    order: 4;
+  }
+}
+
+@media (max-width: 900px) {
+  .header {
+    row-gap: 8px;
+    padding: 9px 132px 9px 12px;
+  }
+
+  .left {
+    gap: 10px;
+  }
+
+  .brand img {
+    height: 44px !important;
+  }
+
+  .brand > span {
+    margin-top: 2px;
+  }
+
+  .navTabs {
+    flex: 1;
+    margin-left: 0;
+  }
+
+  .navTab {
+    flex: 1;
+    justify-content: center;
+    padding-inline: 10px;
+  }
+
+  .right {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: start;
+    gap: 8px 10px;
+  }
+
+  .headerActions {
+    grid-column: 1 / -1;
+  }
+
+  .deepScanBtn,
+  .rulesToggleBtn,
+  .gameModeBtn {
+    padding-inline: 10px;
+  }
+
+  .profileSelect {
+    min-width: 112px;
+    max-width: 138px;
+  }
+
+  .stats {
+    gap: 6px;
+  }
+
+  .center,
+  .searchInput {
+    width: 100%;
+    max-width: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .gameModeBtn,
+  .rulesToggleBtn,
+  .deepScanBtn,
+  .iconBtn,
+  .navTab {
+    transition-duration: 0.01ms;
+  }
+
+  .rulesIndicatorActive,
+  .spin,
+  .pulse {
+    animation: none;
+  }
+}

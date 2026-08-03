@@ -95,6 +95,10 @@
   margin-bottom: 36px;
 }
 
+.tierCollapsed {
+  margin-bottom: 14px;
+}
+
 .tierUnknown {
   background: rgba(185, 28, 28, 0.04);
   border: 1px solid rgba(185, 28, 28, 0.12);
@@ -104,10 +108,30 @@
 }
 
 .tierHeader {
+  width: 100%;
+  min-height: 36px;
   display: flex;
   align-items: center;
   gap: 10px;
   margin-bottom: 14px;
+  padding: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+}
+
+.tierHeader:hover {
+  background: rgba(255, 255, 255, 0.025);
+}
+
+.tierHeader:focus-visible {
+  outline: 2px solid var(--trusted);
+  outline-offset: 2px;
+}
+
+.tierCollapsed .tierHeader {
+  margin-bottom: 0;
 }
 
 .tierDot {
@@ -155,6 +179,19 @@
   flex: 1;
   height: 1px;
   background: var(--border);
+}
+
+.tierChevron {
+  flex: 0 0 auto;
+  color: var(--text-muted);
+  font-size: 17px;
+  line-height: 1;
+  transform: rotate(-90deg);
+  transition: transform 0.18s ease;
+}
+
+.tierChevronOpen {
+  transform: rotate(0deg);
 }
 
 /* ── Tier grid (same column logic as flat grid) ── */
@@ -230,4 +267,85 @@
   gap: 16px 20px;
   align-items: flex-start;
   padding-bottom: 4px;
+}
+
+@media (max-width: 900px) {
+  .filters,
+  .content {
+    padding-inline: 16px;
+  }
+
+  .sortWrap {
+    margin-left: 0;
+  }
+
+  .tierGrid,
+  .grid {
+    grid-template-columns: repeat(auto-fill, minmax(min(220px, 100%), 1fr));
+  }
+}
+
+@media (max-width: 680px) {
+  .filters {
+    gap: 6px;
+    padding: 0 10px 12px;
+  }
+
+  .filterBtn,
+  .groupToggle {
+    padding-inline: 11px;
+  }
+
+  .sortWrap {
+    order: 2;
+    width: 100%;
+  }
+
+  .sortSelect {
+    flex: 1;
+  }
+
+  .content {
+    padding: 0 10px 24px;
+  }
+
+  .tier,
+  .tierUnknown {
+    margin-bottom: 20px;
+  }
+
+  .tierUnknown {
+    padding: 10px 10px 2px;
+  }
+
+  .tierHeader {
+    gap: 7px;
+  }
+
+  .tierLine {
+    display: none;
+  }
+
+  .featuredBlock,
+  .groupExpanded {
+    grid-column: auto;
+  }
+
+  .tierGrid,
+  .grid,
+  .childGrid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tierChevron,
+  .filterBtn,
+  .groupToggle {
+    transition-duration: 0.01ms;
+  }
+
+  .tierDot.unknown {
+    animation: none;
+  }
 }

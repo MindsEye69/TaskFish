@@ -1,5 +1,5 @@
 "use client";
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import type { PageFileConfiguration, ProcessInfo, SystemStats } from "@/lib/types";
 import { isPageFileConfigurationHealthy } from "@/lib/pageFileAdvisor";
 import styles from "./MemoryWatch.module.css";
@@ -195,6 +195,7 @@ function MemoryList({
 }
 
 export default function MemoryWatch({ processes, processHistory, latestStats, guardian, pageFileConfiguration, pageFileScanning = false, onScanPageFile, onSelect, onLimitGroup, onKillGroup }: Props) {
+  const [collapsed, setCollapsed] = useState(true);
   const rows = useMemo(() => buildRows(processes, processHistory), [processes, processHistory]);
   const pageFileHealthy = isPageFileConfigurationHealthy(pageFileConfiguration);
   const totalRam = rows.reduce((sum, row) => sum + row.ramMB, 0);
@@ -205,17 +206,29 @@ export default function MemoryWatch({ processes, processHistory, latestStats, gu
     .slice(0, 5);
 
   return (
-    <section className={styles.panel} aria-label="Memory watch">
-      <div className={styles.summary}>
-        <div>
-          <div className={styles.title}>Memory Guardian</div>
-        </div>
-        <div className={styles.total}>
+    <section className={`${styles.panel} ${collapsed ? styles.panelCollapsed : ""}`} aria-label="Memory watch">
+      <button
+        type="button"
+        className={styles.summary}
+        onClick={() => setCollapsed((current) => !current)}
+        aria-expanded={!collapsed}
+        aria-controls="memory-guardian-content"
+      >
+        <span className={styles.summaryLead}>
+          <span className={styles.title}>Memory Guardian</span>
+          <span className={`${styles.summaryStatus} ${guardian && guardian.level !== "ok" ? styles[guardian.level] : ""}`}>
+            {guardian?.level === "critical" ? "Critical" : guardian?.level === "warn" ? "Attention" : "Stable"}
+          </span>
+        </span>
+        <span className={styles.total}>
           <span>{fmtRam(totalRam)}</span>
           <small>tracked</small>
-        </div>
-      </div>
-      {guardian && (
+        </span>
+        <span className={`${styles.chevron} ${collapsed ? "" : styles.chevronOpen}`} aria-hidden="true">⌄</span>
+      </button>
+      {!collapsed && (
+        <div id="memory-guardian-content" className={styles.panelContent}>
+          {guardian && (
         <div className={`${styles.guardian} ${styles[guardian.level]}`}>
           <div className={styles.guardianCopy}>
             <strong>{guardian.message}</strong>
@@ -227,8 +240,8 @@ export default function MemoryWatch({ processes, processHistory, latestStats, gu
             <span>{latestStats?.pageFileRecommended ? "Pagefile headroom low" : "Pagefile ok"}</span>
           </div>
         </div>
-      )}
-      <div className={`${styles.pageFileAdvisor} ${pageFileConfiguration ? styles[pageFileConfiguration.advice.kind] : ""} ${pageFileHealthy ? styles.pageFileHealthy : ""}`}>
+          )}
+          <div className={`${styles.pageFileAdvisor} ${pageFileConfiguration ? styles[pageFileConfiguration.advice.kind] : ""} ${pageFileHealthy ? styles.pageFileHealthy : ""}`}>
           <div className={styles.pageFileHeading}>
             <div>
               <div className={styles.listTitle}>Pagefile Advisor</div>
@@ -303,12 +316,14 @@ export default function MemoryWatch({ processes, processHistory, latestStats, gu
               </div>
             </>
           )}
+          </div>
+          <div className={`${styles.title} ${styles.memoryUsersTitle}`}>Top memory users</div>
+          <div className={styles.grid}>
+            <MemoryList title="Highest RAM" rows={highest} mode="usage" onSelect={onSelect} onLimitGroup={onLimitGroup} onKillGroup={onKillGroup} />
+            <MemoryList title="Climbing" rows={climbers} mode="climb" onSelect={onSelect} onLimitGroup={onLimitGroup} onKillGroup={onKillGroup} />
+          </div>
         </div>
-      <div className={`${styles.title} ${styles.memoryUsersTitle}`}>Top memory users</div>
-      <div className={styles.grid}>
-        <MemoryList title="Highest RAM" rows={highest} mode="usage" onSelect={onSelect} onLimitGroup={onLimitGroup} onKillGroup={onKillGroup} />
-        <MemoryList title="Climbing" rows={climbers} mode="climb" onSelect={onSelect} onLimitGroup={onLimitGroup} onKillGroup={onKillGroup} />
-      </div>
+      )}
     </section>
   );
 }

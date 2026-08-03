@@ -111,10 +111,17 @@ export default function ProcessGrid({
   const [sort, setSort]               = useState<Sort>("ram");
   const [expandedIds, setExpandedIds] = useState<Set<number>>(new Set());
   const [vendorGrouped, setVendorGrouped] = useState(true);
+  const [collapsedTiers, setCollapsedTiers] = useState<Set<TierKey>>(new Set<TierKey>(["user"]));
 
   const toggleExpand = (id: number) => setExpandedIds(prev => {
     const next = new Set(prev);
     if (next.has(id)) next.delete(id); else next.add(id);
+    return next;
+  });
+
+  const toggleTier = (key: TierKey) => setCollapsedTiers((previous) => {
+    const next = new Set(previous);
+    if (next.has(key)) next.delete(key); else next.add(key);
     return next;
   });
 
@@ -241,6 +248,7 @@ export default function ProcessGrid({
           ) : (
             tiers.map(tier => {
               const isUnknown   = tier.key === "unknown";
+              const isCollapsed = collapsedTiers.has(tier.key);
               // Vendor grouping applies to user + background tiers only
               const canGroup = vendorGrouped && (tier.key === "user" || tier.key === "background");
 
@@ -249,16 +257,24 @@ export default function ProcessGrid({
               return (
                 <div
                   key={tier.key}
-                  className={`${styles.tier}${isUnknown ? ` ${styles.tierUnknown}` : ""}`}
+                  className={`${styles.tier}${isUnknown ? ` ${styles.tierUnknown}` : ""}${isCollapsed ? ` ${styles.tierCollapsed}` : ""}`}
                 >
-                  <div className={styles.tierHeader}>
+                  <button
+                    type="button"
+                    className={styles.tierHeader}
+                    onClick={() => toggleTier(tier.key)}
+                    aria-expanded={!isCollapsed}
+                    aria-controls={`tier-content-${tier.key}`}
+                  >
                     <span className={`${styles.tierDot} ${styles[tier.catClass]}`} />
                     <span className={styles.tierName}>{tier.label}</span>
                     <span className={styles.tierCount}>{tier.nodes.length}</span>
                     <span className={styles.tierRam}>{fmtRam(totalRam)}</span>
-                    <div className={styles.tierLine} />
-                  </div>
+                    <span className={styles.tierLine} />
+                    <span className={`${styles.tierChevron} ${isCollapsed ? "" : styles.tierChevronOpen}`} aria-hidden="true">⌄</span>
+                  </button>
 
+                  {!isCollapsed && <div id={`tier-content-${tier.key}`} className={styles.tierContent}>
                   {canGroup ? (() => {
                     const { vendors, ungrouped } = buildVendorGroups(tier.nodes);
                     const featuredIds = getFeaturedIds(ungrouped);
@@ -309,6 +325,7 @@ export default function ProcessGrid({
                       })()}
                     </div>
                   )}
+                  </div>}
                 </div>
               );
             })

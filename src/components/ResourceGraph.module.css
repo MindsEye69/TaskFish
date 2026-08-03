@@ -57,3 +57,30 @@
   0%, 100% { opacity: 0.75; }
   50%       { opacity: 1; }
 }
+
+@media (max-width: 1180px) {
+  .container {
+    gap: 6px;
+    padding-inline: 8px;
+  }
+
+  .info {
+    min-width: 42px;
+  }
+
+  .graphWrap {
+    width: clamp(72px, 9vw, 104px);
+  }
+}
+
+@media (max-width: 900px) {
+  .graphWrap {
+    display: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .peakDot {
+    animation: none;
+  }
+}

@@ -22,7 +22,7 @@
   transition: opacity 0.25s ease, transform 0.25s ease;
 }
 
-.view.listView { padding-top: 20px; }
+.view.listView { padding-top: clamp(10px, 1.5vw, 20px); }
 
 .view.enter  { opacity: 1; transform: none; }
 .view.exit   { opacity: 0; transform: scale(0.96) translateY(8px); pointer-events: none; }
@@ -76,3 +76,14 @@
   cursor: pointer;
 }
 .retryBtn:hover { background: rgba(248,113,113,0.22); }
+
+@media (prefers-reduced-motion: reduce) {
+  .view,
+  .retryBtn {
+    transition-duration: 0.01ms;
+  }
+
+  .spinner {
+    animation-duration: 1.5s;
+  }
+}
