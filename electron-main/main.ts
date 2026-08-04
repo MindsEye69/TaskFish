@@ -26,7 +26,7 @@ import {
 } from "./localInferenceProvider";
 import { prepareGameModeTargets } from "./gameModePolicy";
 import { assessPageFileConfiguration, PAGE_FILE_PROBE_SCRIPT } from "../src/lib/pageFileAdvisor";
-import type { GameModeSessionResult, GameModeTarget, PageFileConfiguration, ProcessPriority } from "../src/lib/types";
+import type { ClearPrivacyDataResult, GameModeSessionResult, GameModeTarget, PageFileConfiguration, PrivacyDataKey, PrivacyDiagnostics, PrivacyDiagnosticsStore, ProcessPriority } from "../src/lib/types";
 import {
   decideWatchdogAction,
   isWatchdogProtectedProcess,
@@ -2479,6 +2479,126 @@ interface EventFixResult {
 }
 
 const eventFixCachePath = path.join(userDataPath, "event_fix_cache.json");
+
+const PRIVACY_DATA_STORES: Record<PrivacyDataKey, Omit<PrivacyDiagnosticsStore, "exists" | "sizeBytes" | "modifiedAt">> = {
+  processAnalysis: {
+    key: "processAnalysis",
+    label: "Process analysis cache",
+    description: "Cached local AI verdicts, titles, tips, risk scores, and suggested process rules.",
+    path: cachePath,
+    clearable: true,
+  },
+  processMetadata: {
+    key: "processMetadata",
+    label: "Process signature metadata",
+    description: "Executable paths, digital signature vendors, trust metadata, and signature audit results.",
+    path: metaCachePath,
+    clearable: true,
+  },
+  iconCache: {
+    key: "iconCache",
+    label: "Icon cache",
+    description: "Extracted process icons stored for faster dashboard rendering.",
+    path: iconCachePath,
+    clearable: true,
+  },
+  auditLog: {
+    key: "auditLog",
+    label: "Activity audit log",
+    description: "Recent local TaskFish actions such as rule changes, scans, kills, and Event Health operations.",
+    path: auditLogPath,
+    clearable: true,
+  },
+  eventHealth: {
+    key: "eventHealth",
+    label: "Event Health AI cache",
+    description: "Cached AI summaries and findings for imported or live Windows Event Health reports.",
+    path: eventHealthCachePath,
+    clearable: true,
+  },
+  eventFixes: {
+    key: "eventFixes",
+    label: "Event Fix advice cache",
+    description: "Cached repair cards and troubleshooting guidance generated for Event Health findings.",
+    path: eventFixCachePath,
+    clearable: true,
+  },
+  debugLog: {
+    key: "debugLog",
+    label: "Debug log",
+    description: "TaskFish desktop startup and runtime diagnostics written locally for troubleshooting.",
+    path: logPath || path.join(userDataPath, "logs", "taskfish_debug.txt"),
+    clearable: true,
+  },
+};
+
+function storeWithFileStats(store: Omit<PrivacyDiagnosticsStore, "exists" | "sizeBytes" | "modifiedAt">): PrivacyDiagnosticsStore {
+  try {
+    const stats = fs.statSync(store.path);
+    return {
+      ...store,
+      exists: true,
+      sizeBytes: stats.size,
+      modifiedAt: stats.mtime.toISOString(),
+    };
+  } catch {
+    return {
+      ...store,
+      exists: false,
+      sizeBytes: 0,
+    };
+  }
+}
+
+function buildPrivacyDiagnostics(): PrivacyDiagnostics {
+  const config = readLocalInferenceConfiguration(process.env);
+  const providerRoute = selectLocalInferenceProvider(config.requested, config.windowsAi);
+  return {
+    userDataPath,
+    localAiProvider: providerRoute.selected,
+    localAiStatus: currentAiStatus,
+    localAiPayloads: [
+      "Process name, executable path, vendor/signature metadata, trust/category, CPU/RAM, handles, and parent process.",
+      "Recent TCP/UDP endpoint summaries, Windows service linkage, loaded module names/paths, and startup registration status.",
+      "Windows Event Health clusters, sample event messages, AI finding summaries, and repair-chat context when those features are used.",
+      "Payloads are sent only to the selected local runtime boundary; TaskFish does not call a hosted AI endpoint for these desktop analyses.",
+    ],
+    stores: Object.values(PRIVACY_DATA_STORES).map(storeWithFileStats),
+  };
+}
+
+ipcMain.handle("get-privacy-diagnostics", async () => buildPrivacyDiagnostics());
+
+ipcMain.handle("clear-privacy-data", async (_event, keys: PrivacyDataKey[]): Promise<ClearPrivacyDataResult> => {
+  const requested = Array.isArray(keys) ? keys : [];
+  const result: ClearPrivacyDataResult = { ok: true, cleared: [], errors: [] };
+
+  for (const key of requested) {
+    const store = PRIVACY_DATA_STORES[key];
+    if (!store?.clearable) {
+      result.errors.push({ key, error: "Unknown or non-clearable data store" });
+      continue;
+    }
+
+    try {
+      if (key === "iconCache") iconCacheMap.clear();
+      if (key === "processMetadata") metaCache = {};
+
+      if (key === "debugLog") {
+        fs.mkdirSync(path.dirname(store.path), { recursive: true });
+        fs.writeFileSync(store.path, `--- LOG CLEARED: ${new Date().toISOString()} ---\n`);
+      } else {
+        saveJson(store.path, key === "auditLog" ? [] : {});
+      }
+      result.cleared.push(key);
+    } catch (error) {
+      result.errors.push({ key, error: error instanceof Error ? error.message : String(error) });
+    }
+  }
+
+  result.ok = result.errors.length === 0;
+  return result;
+});
 
 interface EventFixChatMessage {
   role: "user" | "assistant";

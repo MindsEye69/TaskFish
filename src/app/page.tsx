@@ -1,6 +1,7 @@
 "use client";
 import { useCallback, useEffect, useRef, useState, useMemo } from "react";
 import type { AnalysisResult, ProcessInfo, TreeNode, RuleConfig, ProcessProfile, AiSetupPhase, SystemStats, PageFileConfiguration, WatchdogMode, WatchdogProcessEvent, WatchdogRule, GameModeSessionResult, GameModeTarget } from "@/lib/types";
+import type { EventHealthReport } from "@/lib/eventLog";
 import { MANUAL_PROFILE_ID } from "@/lib/profiles";
 import { buildTree, findNode, groupWithHelpers } from "@/lib/processTree";
 import Header from "@/components/Header";
@@ -9,6 +10,7 @@ import MindMap from "@/components/MindMap";
 import AnalysisDrawer from "@/components/AnalysisDrawer";
 import SecurityCenter from "@/components/SecurityCenter";
 import MemoryWatch, { type MemoryGuardianState } from "@/components/MemoryWatch";
+import styles from "./page.module.css";
 import {
   advanceMemoryAlertEpisode,
   ignoreMemoryAlertEpisode,
@@ -28,6 +30,19 @@ interface ApiResponse {
 type ProcessHistory = Record<string, { cpu: number; ram: number }[]>;
 type AuditEvent = { id: string; ts: number; type: string; message: string; details?: unknown };
 type MemoryAlertLevel = "ok" | "warn" | "critical";
+type RulePreviewService = { Name?: string; DisplayName?: string; Status?: string; StartMode?: string };
+type RuleImpactPreview = {
+  name: string;
+  ruleName: string;
+  config: RuleConfig;
+  existingRule?: RuleConfig;
+  target?: ProcessInfo;
+  childProcesses: ProcessInfo[];
+  services: RulePreviewService[];
+  network: { tcp: any[]; udp: any[]; remoteTcpCount: number };
+  startup: { isStartupApp: boolean } | null;
+  likelyImpact: string[];
+};
 
 const DEFAULT_SETTINGS = {
   graphPollMs: 3000,
@@ -39,6 +54,31 @@ const DEFAULT_SETTINGS = {
 
 function normalizeName(name: string) {
   return (name || "").toLowerCase().replace(/\.exe$/i, "");
+}
+
+function isRemoteTcpConnection(conn: any) {
+  const remote = String(conn?.RemoteAddress ?? "");
+  return remote && remote !== "*" && remote !== "0.0.0.0" && remote !== "::";
+}
+
+function describeRuleImpact(action: RuleConfig["action"], target?: ProcessInfo) {
+  if (action === "BAN") {
+    return [
+      "TaskFish will terminate matching running processes when rules are enforced.",
+      "Child processes may close with the parent process.",
+      target?.category === "system"
+        ? "System-category processes can destabilize Windows or active applications."
+        : "Unsaved work in the target application can be lost.",
+    ];
+  }
+  if (action === "LIMITED") {
+    return [
+      "TaskFish will lower matching running processes to idle priority.",
+      "The app should remain running, but background work, updates, or sync tasks may slow down.",
+      "This is reversible by removing the rule or changing it to ALLOW/NONE.",
+    ];
+  }
+  return [];
 }
 
 function activeGameModeSummary(result: GameModeSessionResult): string | undefined {
@@ -109,9 +149,13 @@ export default function Home() {
   const [statsHistory, setStatsHistory] = useState<SystemStats[]>([]);
   const [processHistory, setProcessHistory] = useState<ProcessHistory>({});
   const [auditEvents, setAuditEvents] = useState<AuditEvent[]>([]);
+  const [eventHealthReports, setEventHealthReports] = useState<EventHealthReport[]>([]);
   const [memoryGuardian, setMemoryGuardian] = useState<MemoryGuardianState | undefined>();
   const [pageFileConfiguration, setPageFileConfiguration] = useState<PageFileConfiguration | undefined>();
   const [pageFileScanning, setPageFileScanning] = useState(false);
+  const [ruleImpactPreview, setRuleImpactPreview] = useState<RuleImpactPreview | null>(null);
+  const [rulePreviewLoading, setRulePreviewLoading] = useState(false);
+  const [ruleApplyBusy, setRuleApplyBusy] = useState(false);
 
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const statsIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -206,6 +250,14 @@ export default function Home() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ type, message, details }),
     }).catch(() => {});
+  }, []);
+
+  const recordEventHealthReport = useCallback((report: EventHealthReport) => {
+    setEventHealthReports(prev => {
+      const reportKey = report.fileHash ?? `${report.fileName}:${report.importedAt}`;
+      const retained = prev.filter(item => (item.fileHash ?? `${item.fileName}:${item.importedAt}`) !== reportKey);
+      return [report, ...retained].slice(0, 5);
+    });
   }, []);
 
   const handleToggleRules = useCallback(() => {
@@ -856,7 +908,7 @@ export default function Home() {
     }
   }, [processes, selected, roots, groups, view]);
 
-  const handleRuleChange = useCallback(async (name: string, config: RuleConfig) => {
+  const commitRuleChange = useCallback(async (name: string, config: RuleConfig) => {
     const ruleName = normalizeName(name);
     const ESSENTIAL_PROCESSES = [
       "explorer.exe", "svchost.exe", "lsass.exe", "csrss.exe", 
@@ -887,6 +939,85 @@ export default function Home() {
     }
   }, [fetchRules, addAuditEvent]);
 
+  const buildRuleImpactPreview = useCallback(async (name: string, config: RuleConfig): Promise<RuleImpactPreview> => {
+    const ruleName = normalizeName(name);
+    const target = processes.find(proc => normalizeName(proc.name) === ruleName);
+    const childProcesses: ProcessInfo[] = [];
+    if (target) {
+      const queue = [target.id];
+      const seen = new Set<number>(queue);
+      while (queue.length > 0) {
+        const parentId = queue.shift()!;
+        for (const proc of processes) {
+          if (proc.ppid === parentId && !seen.has(proc.id)) {
+            seen.add(proc.id);
+            childProcesses.push(proc);
+            queue.push(proc.id);
+          }
+        }
+      }
+    }
+
+    let network = { tcp: [] as any[], udp: [] as any[], remoteTcpCount: 0 };
+    let services: RulePreviewService[] = [];
+    let startup: { isStartupApp: boolean } | null = null;
+
+    if (window.electron && target) {
+      const serviceTargets = [target, ...childProcesses.slice(0, 4)];
+      const [networkData, startupData, serviceGroups] = await Promise.all([
+        window.electron.getProcessNetwork(target.id).catch(() => ({ tcp: [], udp: [] })),
+        window.electron.getStartupInfo(name).catch(() => null),
+        Promise.all(serviceTargets.map(proc =>
+          window.electron!.getProcessServices(proc.id).catch(() => [])
+        )),
+      ]);
+      const tcp = Array.isArray(networkData.tcp) ? networkData.tcp : [];
+      const udp = Array.isArray(networkData.udp) ? networkData.udp : [];
+      network = { tcp, udp, remoteTcpCount: tcp.filter(isRemoteTcpConnection).length };
+      startup = startupData;
+      services = serviceGroups.flat().slice(0, 8);
+    }
+
+    return {
+      name,
+      ruleName,
+      config,
+      existingRule: rules[ruleName],
+      target,
+      childProcesses,
+      services,
+      network,
+      startup,
+      likelyImpact: describeRuleImpact(config.action, target),
+    };
+  }, [processes, rules]);
+
+  const handleRuleChange = useCallback(async (name: string, config: RuleConfig) => {
+    if (config.action === "BAN" || config.action === "LIMITED") {
+      setRulePreviewLoading(true);
+      try {
+        const preview = await buildRuleImpactPreview(name, config);
+        setRuleImpactPreview(preview);
+      } finally {
+        setRulePreviewLoading(false);
+      }
+      return;
+    }
+    await commitRuleChange(name, config);
+  }, [buildRuleImpactPreview, commitRuleChange]);
+
+  const confirmRuleImpactPreview = useCallback(async () => {
+    if (!ruleImpactPreview || ruleApplyBusy) return;
+    setRuleApplyBusy(true);
+    try {
+      await commitRuleChange(ruleImpactPreview.name, ruleImpactPreview.config);
+      setRuleImpactPreview(null);
+      fetchProcesses();
+    } finally {
+      setRuleApplyBusy(false);
+    }
+  }, [commitRuleChange, fetchProcesses, ruleApplyBusy, ruleImpactPreview]);
+
   const acceptProcess = useCallback(async (node: TreeNode) => {
     await handleRuleChange(node.name, { action: "ALLOW", autoKillMins: null });
     setSelected(null);
@@ -905,6 +1036,12 @@ export default function Home() {
   const handleApplySuggestions = useCallback(async () => {
     const toApply = scanResults.filter(r => selectedSuggestions.has(r.name) && r.action !== "NONE");
     if (toApply.length === 0) return;
+    const riskyRule = toApply.find(r => r.action === "BAN" || r.action === "LIMITED");
+    if (riskyRule) {
+      await handleRuleChange(riskyRule.name, { action: riskyRule.action as RuleConfig["action"], autoKillMins: null });
+      showToast("Review the rule impact before applying suggested limits or bans");
+      return;
+    }
     setApplyingRules(true);
     try {
       for (const r of toApply) {
@@ -1524,6 +1661,7 @@ export default function Home() {
             aiAvailable={aiAvailable}
             aiSetupPhase={aiSetupPhase}
             onRecordStatus={addAuditEvent}
+            onEventHealthReport={recordEventHealthReport}
           />
         )}
       </div>
@@ -1542,11 +1680,137 @@ export default function Home() {
           }}
           onClose={() => setAnalysisTarget(null)}
           auditEvents={auditEvents}
+          eventHealthReports={eventHealthReports}
           processHistory={processHistory[normalizeName(analysisTarget.name)] ?? []}
           aiAvailable={aiAvailable}
           aiSetupPhase={aiSetupPhase}
           aiSetupError={aiSetupError}
         />
+      )}
+
+      {(rulePreviewLoading || ruleImpactPreview) && (
+        <div className={styles.rulePreviewOverlay}>
+          <div className={styles.rulePreviewDialog}>
+            {rulePreviewLoading && !ruleImpactPreview ? (
+              <div className={styles.rulePreviewLoading}>
+                <div className={styles.spinner} />
+                <span>Checking rule impact...</span>
+              </div>
+            ) : ruleImpactPreview && (
+              <>
+                <div className={styles.rulePreviewHeader}>
+                  <div>
+                    <div className={styles.rulePreviewKicker}>Rule Simulation</div>
+                    <h2 className={styles.rulePreviewTitle}>
+                      {ruleImpactPreview.config.action} {ruleImpactPreview.ruleName}
+                    </h2>
+                  </div>
+                  <button
+                    type="button"
+                    className={styles.rulePreviewClose}
+                    onClick={() => setRuleImpactPreview(null)}
+                    disabled={ruleApplyBusy}
+                    aria-label="Cancel rule preview"
+                  >
+                    ×
+                  </button>
+                </div>
+
+                <div className={styles.rulePreviewGrid}>
+                  <div className={styles.rulePreviewMetric}>
+                    <span>Running target</span>
+                    <strong>{ruleImpactPreview.target ? `PID ${ruleImpactPreview.target.id}` : "Not running"}</strong>
+                  </div>
+                  <div className={styles.rulePreviewMetric}>
+                    <span>Child processes</span>
+                    <strong>{ruleImpactPreview.childProcesses.length}</strong>
+                  </div>
+                  <div className={styles.rulePreviewMetric}>
+                    <span>Services</span>
+                    <strong>{ruleImpactPreview.services.length}</strong>
+                  </div>
+                  <div className={styles.rulePreviewMetric}>
+                    <span>Network</span>
+                    <strong>{ruleImpactPreview.network.remoteTcpCount} remote / {ruleImpactPreview.network.udp.length} UDP</strong>
+                  </div>
+                  <div className={styles.rulePreviewMetric}>
+                    <span>Startup entry</span>
+                    <strong>{ruleImpactPreview.startup?.isStartupApp ? "Yes" : "No"}</strong>
+                  </div>
+                  <div className={styles.rulePreviewMetric}>
+                    <span>Current rule</span>
+                    <strong>{ruleImpactPreview.existingRule?.action ?? "NONE"}</strong>
+                  </div>
+                </div>
+
+                {ruleImpactPreview.target && (
+                  <div className={styles.rulePreviewSection}>
+                    <div className={styles.rulePreviewSectionTitle}>Target</div>
+                    <div className={styles.rulePreviewLine}>
+                      {ruleImpactPreview.target.name} · {ruleImpactPreview.target.trust} · CPU {ruleImpactPreview.target.cpu.toFixed(1)}% · RAM {ruleImpactPreview.target.ramMB.toFixed(0)} MB
+                    </div>
+                    {ruleImpactPreview.target.execPath && (
+                      <div className={styles.rulePreviewMuted}>{ruleImpactPreview.target.execPath}</div>
+                    )}
+                  </div>
+                )}
+
+                {ruleImpactPreview.childProcesses.length > 0 && (
+                  <div className={styles.rulePreviewSection}>
+                    <div className={styles.rulePreviewSectionTitle}>Child processes</div>
+                    <div className={styles.rulePreviewList}>
+                      {ruleImpactPreview.childProcesses.slice(0, 6).map(proc => (
+                        <span key={proc.id}>{proc.name} ({proc.id})</span>
+                      ))}
+                      {ruleImpactPreview.childProcesses.length > 6 && (
+                        <span>+{ruleImpactPreview.childProcesses.length - 6} more</span>
+                      )}
+                    </div>
+                  </div>
+                )}
+
+                {ruleImpactPreview.services.length > 0 && (
+                  <div className={styles.rulePreviewSection}>
+                    <div className={styles.rulePreviewSectionTitle}>Mapped services</div>
+                    <div className={styles.rulePreviewList}>
+                      {ruleImpactPreview.services.slice(0, 6).map((svc, index) => (
+                        <span key={`${svc.Name ?? svc.DisplayName ?? "service"}-${index}`}>
+                          {svc.DisplayName || svc.Name || "Service"}{svc.Status ? ` · ${svc.Status}` : ""}
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                <div className={styles.rulePreviewSection}>
+                  <div className={styles.rulePreviewSectionTitle}>Likely impact</div>
+                  <ul className={styles.rulePreviewBullets}>
+                    {ruleImpactPreview.likelyImpact.map(item => <li key={item}>{item}</li>)}
+                  </ul>
+                </div>
+
+                <div className={styles.rulePreviewActions}>
+                  <button
+                    type="button"
+                    className={styles.rulePreviewCancel}
+                    onClick={() => setRuleImpactPreview(null)}
+                    disabled={ruleApplyBusy}
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="button"
+                    className={ruleImpactPreview.config.action === "BAN" ? styles.rulePreviewDanger : styles.rulePreviewApply}
+                    onClick={confirmRuleImpactPreview}
+                    disabled={ruleApplyBusy}
+                  >
+                    {ruleApplyBusy ? "Applying..." : `Apply ${ruleImpactPreview.config.action}`}
+                  </button>
+                </div>
+              </>
+            )}
+          </div>
+        </div>
       )}
 
       {activeWatchdogEvent && (

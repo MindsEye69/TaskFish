@@ -1,6 +1,6 @@
 "use client";
-import { useState, useMemo, useCallback } from "react";
-import type { AiSetupPhase, ProcessInfo, ProcessProfile, RuleConfig, EventFixResult, EventFixStep, EventFixChatMessage } from "@/lib/types";
+import { useState, useMemo, useCallback, useEffect } from "react";
+import type { AiSetupPhase, ProcessInfo, ProcessProfile, RuleConfig, EventFixResult, EventFixStep, EventFixChatMessage, PrivacyDataKey, PrivacyDiagnostics } from "@/lib/types";
 import type { EventHealthReport, EventCluster, EventHealthAnalysis, EventHealthFinding } from "@/lib/eventLog";
 import styles from "./SecurityCenter.module.css";
 
@@ -21,6 +21,7 @@ interface Props {
   aiAvailable?: boolean;
   aiSetupPhase?: AiSetupPhase;
   onRecordStatus?: (type: string, message: string, details?: unknown) => void;
+  onEventHealthReport?: (report: EventHealthReport) => void;
 }
 
 function normalizeProcessName(name: string) {
@@ -68,6 +69,7 @@ const EVENT_COLORS: Record<string, { bg: string; color: string; label: string }>
   unknown:     { bg: "rgba(245,158,11,0.12)",  color: "#f59e0b", label: "UNKNOWN" },
   scan:        { bg: "rgba(34,197,94,0.12)",   color: "#22c55e", label: "SCAN" },
   "event-log": { bg: "rgba(96,165,250,0.12)",  color: "#60a5fa", label: "EVENT LOG" },
+  privacy:     { bg: "rgba(20,184,166,0.12)",  color: "#2dd4bf", label: "PRIVACY" },
   "game-mode": { bg: "rgba(139,92,246,0.12)",  color: "#a78bfa", label: "GAME MODE" },
   safety:      { bg: "rgba(34,197,94,0.12)",   color: "#22c55e", label: "SAFETY" },
   priority:    { bg: "rgba(96,165,250,0.08)",  color: "#93c5fd", label: "PRIORITY" },
@@ -85,6 +87,13 @@ function isCopyableCommand(command: string) {
     .map(line => line.trim())
     .filter(Boolean)
     .every(line => COPYABLE_COMMAND_RE.test(line) && !GUI_COMMAND_RE.test(line) && !GUI_LAUNCH_CMD_RE.test(line) && !GUI_EXECUTABLE_RE.test(line));
+}
+
+function formatBytes(bytes: number) {
+  if (bytes <= 0) return "0 B";
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
 function renderFixPanel(
@@ -202,6 +211,7 @@ export default function SecurityCenter({
   aiAvailable = true,
   aiSetupPhase = "ready",
   onRecordStatus,
+  onEventHealthReport,
 }: Props) {
   const [searchQuery, setSearchQuery] = useState("");
   const [filterAction, setFilterAction] = useState<"ALL" | "ALLOW" | "LIMITED" | "BAN">("ALL");
@@ -228,6 +238,49 @@ export default function SecurityCenter({
   const [fixChats, setFixChats] = useState<Record<string, EventFixChatMessage[]>>({});
   const [fixChatInputs, setFixChatInputs] = useState<Record<string, string>>({});
   const [chattingFixes, setChattingFixes] = useState<Set<string>>(new Set());
+  const [privacyDiagnostics, setPrivacyDiagnostics] = useState<PrivacyDiagnostics | null>(null);
+  const [privacyLoading, setPrivacyLoading] = useState(false);
+  const [privacyClearBusy, setPrivacyClearBusy] = useState<PrivacyDataKey | null>(null);
+  const [privacyNotice, setPrivacyNotice] = useState("");
+
+  useEffect(() => {
+    if (eventReport) onEventHealthReport?.(eventReport);
+  }, [eventReport, onEventHealthReport]);
+
+  const refreshPrivacyDiagnostics = useCallback(async () => {
+    if (!window.electron?.getPrivacyDiagnostics) return;
+    setPrivacyLoading(true);
+    try {
+      setPrivacyDiagnostics(await window.electron.getPrivacyDiagnostics());
+    } finally {
+      setPrivacyLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    refreshPrivacyDiagnostics().catch(() => {});
+  }, [refreshPrivacyDiagnostics]);
+
+  const handleClearPrivacyStore = useCallback(async (key: PrivacyDataKey) => {
+    if (!window.electron?.clearPrivacyData || privacyClearBusy) return;
+    setPrivacyClearBusy(key);
+    setPrivacyNotice("");
+    try {
+      const result = await window.electron.clearPrivacyData([key]);
+      if (result.ok) {
+        const label = privacyDiagnostics?.stores.find(store => store.key === key)?.label ?? key;
+        setPrivacyNotice(`${label} cleared.`);
+        onRecordStatus?.("privacy", `Cleared ${label}`, { key });
+      } else {
+        setPrivacyNotice(result.errors.map(error => `${error.key}: ${error.error}`).join("; "));
+      }
+      await refreshPrivacyDiagnostics();
+    } catch (error) {
+      setPrivacyNotice(error instanceof Error ? error.message : String(error));
+    } finally {
+      setPrivacyClearBusy(null);
+    }
+  }, [onRecordStatus, privacyClearBusy, privacyDiagnostics, refreshPrivacyDiagnostics]);
 
   const toggleCategory = useCallback((cat: string) => {
     setExpandedCategories(prev => {
@@ -589,7 +642,7 @@ export default function SecurityCenter({
         <div className={styles.paneHeader}>
           <div className={styles.eventHealthIntro}>
             <span className={styles.eventHealthKicker}>Windows Event Health</span>
-            <span className={styles.eventHealthTitle}>Import and review a saved .evtx event log</span>
+            <span className={styles.eventHealthTitle}>Scan live Windows events or review a saved .evtx log</span>
             <span className={styles.eventHealthStatus}>
               {eventReport
                 ? `${eventReport.fileName} loaded - ${eventReport.totalEvents.toLocaleString()} events clustered`
@@ -1012,6 +1065,65 @@ export default function SecurityCenter({
             Save Profile
           </button>
         </div>
+      </div>
+
+      <div className={styles.privacyPane}>
+        <div className={styles.paneHeader}>
+          <div className={styles.privacyIntro}>
+            <span className={styles.paneTitle}>Privacy & Diagnostics</span>
+            <span className={styles.privacyPath}>{privacyDiagnostics?.userDataPath ?? "Desktop app diagnostics unavailable"}</span>
+          </div>
+          <button
+            type="button"
+            className={styles.importBtn}
+            disabled={privacyLoading}
+            onClick={() => refreshPrivacyDiagnostics().catch(() => {})}
+          >
+            {privacyLoading ? "Refreshing..." : "Refresh"}
+          </button>
+        </div>
+
+        {privacyDiagnostics && (
+          <>
+            <div className={styles.privacyAiPanel}>
+              <div>
+                <span className={styles.privacyLabel}>Local AI provider</span>
+                <strong>{privacyDiagnostics.localAiProvider}</strong>
+              </div>
+              <div>
+                <span className={styles.privacyLabel}>Readiness</span>
+                <strong>{privacyDiagnostics.localAiStatus.phase}</strong>
+              </div>
+            </div>
+            <div className={styles.privacyPayloads}>
+              {privacyDiagnostics.localAiPayloads.map(payload => <span key={payload}>{payload}</span>)}
+            </div>
+            <div className={styles.privacyStoreGrid}>
+              {privacyDiagnostics.stores.map(store => (
+                <div key={store.key} className={styles.privacyStoreCard}>
+                  <div className={styles.privacyStoreHeader}>
+                    <span className={styles.privacyStoreTitle}>{store.label}</span>
+                    <span className={styles.privacyStoreSize}>{formatBytes(store.sizeBytes)}</span>
+                  </div>
+                  <div className={styles.privacyStoreDesc}>{store.description}</div>
+                  <div className={styles.privacyStorePath}>{store.path}</div>
+                  <div className={styles.privacyStoreFooter}>
+                    <span>{store.exists ? (store.modifiedAt ? `Updated ${new Date(store.modifiedAt).toLocaleString()}` : "Stored locally") : "No local file yet"}</span>
+                    <button
+                      type="button"
+                      className={styles.privacyClearBtn}
+                      disabled={!store.clearable || privacyClearBusy !== null}
+                      onClick={() => handleClearPrivacyStore(store.key)}
+                    >
+                      {privacyClearBusy === store.key ? "Clearing..." : "Clear"}
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </>
+        )}
+        {privacyNotice && <div className={styles.noticeText}>{privacyNotice}</div>}
       </div>
 
       <div className={styles.layoutGrid}>

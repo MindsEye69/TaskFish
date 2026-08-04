@@ -2,13 +2,14 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import IconImage from "./IconImage";
 import type { AnalysisResult, RuleConfig, RuleAction, TrustLevel, AiSetupPhase } from "@/lib/types";
+import type { EventHealthReport } from "@/lib/eventLog";
 import styles from "./AnalysisDrawer.module.css";
 
 type AuditEvent = { id: string; ts: number; type: string; message: string; details?: unknown };
 type TimelineEntry = {
   id: string;
   ts: number;
-  kind: "rule" | "audit" | "analysis" | "resource" | "network" | "service" | "identity" | "modules";
+  kind: "rule" | "audit" | "analysis" | "resource" | "network" | "service" | "identity" | "modules" | "event";
   title: string;
   detail: string;
   color: string;
@@ -33,6 +34,7 @@ const KIND_ICONS: Record<string, string> = {
   network:  "⇌",
   service:  "◈",
   modules:  "⬢",
+  event:    "!",
   audit:    "•",
 };
 
@@ -82,6 +84,7 @@ interface Props {
   onRuleChange?: (name: string, config: RuleConfig) => void | Promise<void>;
   onClose: () => void;
   auditEvents?: AuditEvent[];
+  eventHealthReports?: EventHealthReport[];
   processHistory?: { cpu: number; ram: number }[];
   aiAvailable?: boolean;
   aiSetupPhase?: AiSetupPhase;
@@ -98,6 +101,7 @@ export default function AnalysisDrawer({
   onRuleChange,
   onClose,
   auditEvents = [],
+  eventHealthReports = [],
   processHistory = [],
   aiAvailable = true,
   aiSetupPhase = "ready",
@@ -411,6 +415,20 @@ export default function AnalysisDrawer({
 
     const entries: TimelineEntry[] = [];
     const matchedAuditEvents = auditEvents.filter(matchesTarget);
+    const matchedEventClusters = eventHealthReports.flatMap(report =>
+      report.clusters
+        .filter(cluster => {
+          if (!target) return false;
+          const text = [
+            cluster.provider,
+            cluster.summary,
+            cluster.sampleMessage,
+            cluster.key,
+          ].join(" ");
+          return normalizeProcessName(text).includes(target);
+        })
+        .map(cluster => ({ report, cluster }))
+    );
     const syntheticTs = evidenceTimestamp;
 
     if (processName) {
@@ -534,10 +552,22 @@ export default function AnalysisDrawer({
       });
     }
 
+    for (const { report, cluster } of matchedEventClusters.slice(0, 6)) {
+      const eventTs = cluster.lastSeen ? Date.parse(cluster.lastSeen) : report.importedAt;
+      entries.push({
+        id: `event-health:${report.fileHash ?? report.importedAt}:${cluster.key}`,
+        ts: Number.isFinite(eventTs) ? eventTs : report.importedAt,
+        kind: "event",
+        title: `Event log: ${cluster.provider.replace(/^Microsoft-Windows-/, "")} ${cluster.eventId}`,
+        detail: `${cluster.count} ${cluster.levelName.toLowerCase()} event(s) in ${report.fileName}: ${cluster.summary}`,
+        color: cluster.category === "needs-attention" ? "#f87171" : cluster.category === "watch" ? "#f59e0b" : "#60a5fa",
+      });
+    }
+
     return entries
       .sort((a, b) => b.ts - a.ts)
       .slice(0, 16);
-  }, [auditEvents, currentRule, dlls, evidenceTimestamp, isStartupApp, network, processHistory, processName, processPid, processTrust, result, services]);
+  }, [auditEvents, currentRule, dlls, eventHealthReports, evidenceTimestamp, isStartupApp, network, processHistory, processName, processPid, processTrust, result, services]);
 
   return (
     <div className={styles.overlay}>

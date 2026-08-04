@@ -25,6 +25,40 @@ export interface EventFixChatResponse {
   error?: string;
 }
 
+export type PrivacyDataKey =
+  | "processAnalysis"
+  | "processMetadata"
+  | "iconCache"
+  | "auditLog"
+  | "eventHealth"
+  | "eventFixes"
+  | "debugLog";
+
+export interface PrivacyDiagnosticsStore {
+  key: PrivacyDataKey;
+  label: string;
+  description: string;
+  path: string;
+  exists: boolean;
+  sizeBytes: number;
+  modifiedAt?: string;
+  clearable: boolean;
+}
+
+export interface PrivacyDiagnostics {
+  userDataPath: string;
+  localAiProvider: string;
+  localAiStatus: AiSetupStatus;
+  localAiPayloads: string[];
+  stores: PrivacyDiagnosticsStore[];
+}
+
+export interface ClearPrivacyDataResult {
+  ok: boolean;
+  cleared: PrivacyDataKey[];
+  errors: { key: PrivacyDataKey; error: string }[];
+}
+
 export type TrustLevel = "trusted" | "verified" | "background" | "unknown";
 export type Category = "system" | "user" | "background" | "unknown";
 export type RuleAction = "ALLOW" | "BAN" | "LIMITED" | "NONE";
@@ -276,6 +310,8 @@ declare global {
       analyzeEventHealth: (report: EventHealthReport, forceRefresh?: boolean) => Promise<EventHealthAnalysis & { error?: string }>;
       getEventFix: (finding: EventHealthFinding, cluster: EventCluster) => Promise<EventFixResult>;
       chatEventFix: (finding: EventHealthFinding, cluster: EventCluster, fix: EventFixResult, messages: EventFixChatMessage[]) => Promise<EventFixChatResponse>;
+      getPrivacyDiagnostics: () => Promise<PrivacyDiagnostics>;
+      clearPrivacyData: (keys: PrivacyDataKey[]) => Promise<ClearPrivacyDataResult>;
       getAppVersion: () => Promise<string>;
     };
   }
