@@ -45,65 +45,98 @@ import {
 // One long-lived process handles all queries; eliminates per-poll spawning.
 const SENTINEL = "__TF_DONE__";
 
+type PersistentPSQueueItem = {
+  cmd: string;
+  timeoutMs: number;
+  resolve: (s: string) => void;
+  reject: (e: Error) => void;
+  settled: boolean;
+  timer: ReturnType<typeof setTimeout> | null;
+};
+
 class PersistentPS {
   private proc: ChildProcess | null = null;
   private buf = "";
-  private queue: { cmd: string; resolve: (s: string) => void; reject: (e: Error) => void }[] = [];
+  private queue: PersistentPSQueueItem[] = [];
   private running = false;
 
   private start() {
-    this.proc = spawn("powershell.exe",
+    const child = spawn("powershell.exe",
       ["-NoProfile", "-NonInteractive", "-NoLogo", "-NoExit", "-Command", "-"],
       { windowsHide: true, stdio: ["pipe", "pipe", "pipe"] }
     );
-    this.proc.stdout!.on("data", (data: Buffer) => {
+    this.proc = child;
+    child.stdout!.on("data", (data: Buffer) => {
       this.buf += data.toString();
       const idx = this.buf.indexOf(SENTINEL);
       if (idx !== -1) {
         const result = this.buf.slice(0, idx).trim();
         this.buf = this.buf.slice(idx + SENTINEL.length);
-        this.running = false;
         const item = this.queue.shift();
-        if (item) item.resolve(result);
+        if (item) this.finish(item, () => item.resolve(result), false);
+        else this.running = false;
         this.next();
       }
     });
-    this.proc.stderr!.on("data", () => {}); // swallow stderr
-    this.proc.on("exit", () => {
+    child.stderr!.on("data", () => {}); // swallow stderr
+    child.on("exit", () => {
+      if (this.proc !== child) return;
       this.proc = null;
+      const item = this.running ? this.queue.shift() : undefined;
+      if (item) this.finish(item, () => item.reject(new Error("PowerShell process exited")), false);
       this.running = false;
       if (this.queue.length > 0) this.next(); // restart for pending work
     });
+  }
+
+  private finish(item: PersistentPSQueueItem, fn: () => void, advance = true) {
+    if (item.settled) return;
+    item.settled = true;
+    if (item.timer) clearTimeout(item.timer);
+    this.running = false;
+    fn();
+    if (advance) this.next();
   }
 
   private next() {
     if (this.running || this.queue.length === 0) return;
     if (!this.proc || this.proc.killed) this.start();
     this.running = true;
-    const { cmd } = this.queue[0];
-    this.proc!.stdin!.write(`${cmd}\nWrite-Output "${SENTINEL}"\n`);
+    const item = this.queue[0];
+    item.timer = setTimeout(() => {
+      const current = this.queue[0];
+      if (current !== item || item.settled) return;
+      this.queue.shift();
+      this.buf = "";
+      this.running = false;
+      if (this.proc) {
+        try { this.proc.kill(); } catch (_) {}
+        this.proc = null;
+      }
+      this.finish(item, () => item.reject(new Error("PowerShell query timed out")));
+    }, item.timeoutMs);
+
+    try {
+      this.proc!.stdin!.write(`${item.cmd}\nWrite-Output "${SENTINEL}"\n`);
+    } catch (error) {
+      this.queue.shift();
+      this.finish(item, () => item.reject(error instanceof Error ? error : new Error(String(error))));
+    }
   }
 
   run(cmd: string, timeoutMs = 12000): Promise<string> {
     return new Promise((resolve, reject) => {
-      let settled = false;
-      const done = (fn: () => void) => { if (!settled) { settled = true; fn(); } };
-
       const item = {
         cmd,
-        resolve: (s: string) => done(() => resolve(s)),
-        reject: (e: Error) => done(() => reject(e)),
+        timeoutMs,
+        resolve,
+        reject,
+        settled: false,
+        timer: null,
       };
 
       this.queue.push(item);
       if (!this.running) this.next();
-
-      setTimeout(() => {
-        // Reject the caller but leave the item in the queue so the sentinel
-        // stays in sync with PS output. When the sentinel eventually arrives,
-        // item.resolve() calls done() → ignored (settled). Queue resumes normally.
-        done(() => reject(new Error("PS timed out")));
-      }, timeoutMs);
     });
   }
 
@@ -117,6 +150,35 @@ class PersistentPS {
 }
 
 const ps = new PersistentPS();
+let lastGoodProcessSnapshot: any = null;
+
+function isPowerShellTimeoutError(error: unknown) {
+  return /PowerShell query timed out|PS timed out/i.test(String(error));
+}
+
+async function getAppDisplayVersion() {
+  const version = app.getVersion();
+  const buildSha = process.env.TASKFISH_BUILD_SHA?.slice(0, 12);
+  if (buildSha) return `${version}+${buildSha}`;
+
+  try {
+    const { stdout } = await safeExecFile("git", ["rev-parse", "--short=12", "HEAD"], {
+      cwd: app.getAppPath(),
+      timeout: 2000,
+    });
+    const sha = stdout.trim();
+    if (!sha) return version;
+    const dirty = await safeExecFile("git", ["diff", "--quiet", "--ignore-submodules", "HEAD", "--"], {
+      cwd: app.getAppPath(),
+      timeout: 2000,
+    })
+      .then(() => "")
+      .catch(() => ".dirty");
+    return `${version}+${sha}${dirty}`;
+  } catch {
+    return version;
+  }
+}
 
 // safeExec for non-PS one-offs (taskkill, reg.exe, etc.)
 function safeExec(command: string, options: any = {}): Promise<{ stdout: string }> {
@@ -1491,7 +1553,7 @@ $perf  = Get-CimInstance Win32_PerfRawData_PerfProc_Process | Select-Object IDPr
 if (-not $global:tfCores) { $global:tfCores = [int](Get-CimInstance Win32_ComputerSystem).NumberOfLogicalProcessors }
 @{ procs=$procs; perf=$perf; cores=$global:tfCores } | ConvertTo-Json -Depth 3 -Compress`.trim();
 
-    const stdout = await ps.run(query);
+    const stdout = await ps.run(query, 30000);
 
     const cache = loadJson(cachePath);
     // Normalize all rule keys to lowercase-no-ext so mixed-case saves don't miss.
@@ -1609,14 +1671,32 @@ if (-not $global:tfCores) { $global:tfCores = [int](Get-CimInstance Win32_Comput
       });
 
     log(`Returning ${processes.length} processes`);
-    return {
+    const response = {
       processes,
       totalRAM:     Math.round(processes.reduce((acc, p) => acc + p.ramMB, 0)),
       totalCPU:     Math.round(processes.reduce((acc, p) => acc + p.cpu, 0) * 10) / 10,
       unknownCount: processes.filter(p => p.trust === "unknown").length,
     };
+    lastGoodProcessSnapshot = response;
+    return response;
   } catch (err) {
     log("ERROR in get-processes: " + String(err));
+    if (isPowerShellTimeoutError(err)) {
+      return lastGoodProcessSnapshot
+        ? {
+            ...lastGoodProcessSnapshot,
+            warning: "Process refresh timed out; showing the last successful snapshot.",
+            stale: true,
+          }
+        : {
+            processes: [],
+            totalRAM: 0,
+            totalCPU: 0,
+            unknownCount: 0,
+            warning: "Process refresh timed out; waiting for the next successful snapshot.",
+            stale: true,
+          };
+    }
     return { error: "System Error: " + String(err), processes: [] };
   }
 });
@@ -1887,7 +1967,7 @@ ipcMain.handle("list-models", async () => getInstalledModels());
 
 ipcMain.handle("get-ai-status", async () => currentAiStatus);
 
-ipcMain.handle("get-app-version", () => app.getVersion());
+ipcMain.handle("get-app-version", () => getAppDisplayVersion());
 
 ipcMain.handle("pull-model", async (event, modelName: string) => {
   const ready = await startOllama();

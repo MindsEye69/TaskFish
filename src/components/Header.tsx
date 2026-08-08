@@ -84,7 +84,7 @@ export default function Header({
   onApplyProfile,
 }: Props) {
   const [pulse, setPulse] = useState(false);
-  const [appVersion, setAppVersion] = useState("v0.1.8");
+  const [appVersion, setAppVersion] = useState("v0.1.9");
 
   useEffect(() => {
     window.electron?.getAppVersion?.()
